@@ -797,12 +797,46 @@ function playChampionBedYouTube(song, vol) {
   return promise;
 }
 
+/** Songs that lost a match are out of the bracket. */
+function eliminatedTrackIds(s = state) {
+  const out = new Set();
+  if (!s?.history) return out;
+  for (const m of s.history) {
+    if (m?.loserId) out.add(m.loserId);
+  }
+  return out;
+}
+
+function isTrackStillInBracket(song, s = state) {
+  if (!isSongLike(song) || !s) return false;
+  if (s.finished) return s.champion?.id === song.id;
+  return !eliminatedTrackIds(s).has(song.id);
+}
+
+/**
+ * Next transition stinger: walk the original playlist in order, but only pick
+ * songs still alive in the bracket (skip anyone who already lost).
+ */
 function takeNextTransitionSong() {
-  if (!playlistTracks.length) return null;
-  const song = playlistTracks[transitionSongIndex % playlistTracks.length];
-  transitionSongIndex += 1;
-  saveProgress({ immediate: true });
-  return song;
+  if (!playlistTracks.length || !state) return null;
+
+  const eliminated = eliminatedTrackIds(state);
+  const n = playlistTracks.length;
+
+  for (let i = 0; i < n; i++) {
+    const idx = (transitionSongIndex + i) % n;
+    const song = playlistTracks[idx];
+    if (!isSongLike(song)) continue;
+    if (eliminated.has(song.id)) continue;
+
+    // Resume search after this pick next time (same sequential priority)
+    transitionSongIndex = idx + 1;
+    saveProgress({ immediate: true });
+    return song;
+  }
+
+  // Nobody left alive (shouldn't happen mid-tournament)
+  return null;
 }
 
 function playAutoPreview(song, volume, gen) {
