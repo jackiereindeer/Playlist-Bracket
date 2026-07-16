@@ -1,21 +1,17 @@
 /**
- * Full-viewport oscilloscope driven by the real preview audio stream
- * (Web Audio AnalyserNode time-domain data).
+ * Full-viewport oscilloscope backdrop.
+ * Visual only — does NOT touch <audio> elements (createMediaElementSource
+ * was muting all previews). When music is playing, draws a lively reactive
+ * wave; otherwise a faint idle baseline.
  */
 
-const FFT_SIZE = 2048;
-const sources = new WeakMap();
-
-let audioCtx = null;
-let analyser = null;
-let masterGain = null;
-let timeData = null;
 let canvas = null;
 let c2d = null;
 let rafId = 0;
 let resizeObs = null;
 let running = false;
 let lastFrame = 0;
+let pulse = 0;
 
 function cssAccent() {
   try {
@@ -60,88 +56,6 @@ function sizeCanvas() {
   }
 }
 
-function ensureGraph() {
-  if (audioCtx) return audioCtx;
-  const AC = window.AudioContext || window.webkitAudioContext;
-  if (!AC) return null;
-
-  audioCtx = new AC();
-  analyser = audioCtx.createAnalyser();
-  analyser.fftSize = FFT_SIZE;
-  analyser.smoothingTimeConstant = 0.35;
-  analyser.minDecibels = -90;
-  analyser.maxDecibels = -10;
-
-  masterGain = audioCtx.createGain();
-  masterGain.gain.value = 1;
-
-  // sources → master → analyser → speakers
-  masterGain.connect(analyser);
-  analyser.connect(audioCtx.destination);
-
-  timeData = new Uint8Array(analyser.fftSize);
-  ensureCanvas();
-  return audioCtx;
-}
-
-/**
- * Optional CORS for analyser sample access. Do NOT force this on every element —
- * Spotify preview CDN often plays fine without it, and forcing anonymous can
- * block the load entirely (silent champion bed).
- */
-export function prepareMediaElement(audio, { cors = false } = {}) {
-  if (!audio || !cors) return;
-  try {
-    if (!audio.crossOrigin) audio.crossOrigin = 'anonymous';
-  } catch {
-  }
-}
-
-/**
- * Route an <audio> element through the analyser graph (once per element).
- * After this, playback goes through Web Audio (element.volume still works).
- * @param {{ cors?: boolean }} options - cors:true only when you need live waveform samples
- */
-export function connectMediaElement(audio, options = {}) {
-  if (!audio) return false;
-  const { cors = false } = options;
-  prepareMediaElement(audio, { cors });
-  const ctx = ensureGraph();
-  if (!ctx || !masterGain) return false;
-
-  try {
-    if (ctx.state === 'suspended') {
-      // Fire-and-forget; callers should also await resumeAudioContext()
-      ctx.resume().catch(() => {});
-    }
-  } catch {
-  }
-
-  if (sources.has(audio)) return true;
-
-  try {
-    const src = ctx.createMediaElementSource(audio);
-    src.connect(masterGain);
-    sources.set(audio, src);
-    return true;
-  } catch {
-    // Already connected elsewhere, or browser restriction
-    return false;
-  }
-}
-
-/** Resume the shared AudioContext (required after autoplay / tab sleep). */
-export async function resumeAudioContext() {
-  const ctx = ensureGraph();
-  if (!ctx) return false;
-  try {
-    if (ctx.state === 'suspended') await ctx.resume();
-    return ctx.state === 'running';
-  } catch {
-    return false;
-  }
-}
-
 function anyMediaPlaying() {
   for (const id of [
     'audio-a',
@@ -154,18 +68,6 @@ function anyMediaPlaying() {
     if (el && !el.paused && !el.ended) return true;
   }
   return false;
-}
-
-function drawWavePath(data, w, midY, amp, step) {
-  const n = data.length;
-  c2d.beginPath();
-  for (let i = 0; i < n; i += step) {
-    const x = (i / (n - 1)) * w;
-    const v = (data[i] - 128) / 128;
-    const y = midY + v * midY * 0.72 * amp;
-    if (i === 0) c2d.moveTo(x, y);
-    else c2d.lineTo(x, y);
-  }
 }
 
 function drawFrame(now) {
@@ -181,7 +83,6 @@ function drawFrame(now) {
 
   const tNow = now || performance.now();
   const playing = anyMediaPlaying();
-  // Idle: ~20fps; playing: full display refresh
   if (!playing && tNow - lastFrame < 48) {
     rafId = requestAnimationFrame(drawFrame);
     return;
@@ -190,88 +91,75 @@ function drawFrame(now) {
 
   const w = canvas.width;
   const h = canvas.height;
+  const midY = h * 0.5;
+  const accent = cssAccent();
+  const t = tNow * 0.001;
 
-  // Phosphor-style trail
   c2d.fillStyle = 'rgba(12, 11, 16, 0.22)';
   c2d.fillRect(0, 0, w, h);
 
-  const accent = cssAccent();
-  const midY = h * 0.5;
+  // Ease pulse up/down with play state
+  pulse += ((playing ? 1 : 0) - pulse) * 0.08;
+  const amp = playing ? 0.12 + pulse * 0.28 : 0.012;
+  const pts = playing ? 180 : 100;
 
-  let drewSignal = false;
-  if (analyser && timeData && playing && audioCtx?.state === 'running') {
-    analyser.getByteTimeDomainData(timeData);
-    const n = timeData.length;
+  c2d.beginPath();
+  c2d.strokeStyle = accent;
+  c2d.globalAlpha = playing ? 0.35 + pulse * 0.35 : 0.12;
+  c2d.lineWidth = Math.max(1.2, (w / 900) * (playing ? 2.4 : 1.2));
+  c2d.lineJoin = 'round';
+  c2d.lineCap = 'round';
+  c2d.shadowColor = accent;
+  c2d.shadowBlur = playing ? 14 + pulse * 20 : 8;
 
-    let sumSq = 0;
-    let peak = 0;
-    for (let i = 0; i < n; i++) {
-      const v = (timeData[i] - 128) / 128;
-      sumSq += v * v;
-      const a = Math.abs(v);
-      if (a > peak) peak = a;
-    }
-    const rms = Math.sqrt(sumSq / n);
-    // Flat line (all ~128) means CORS blocked analyser — don't claim it's music
-    drewSignal = peak > 0.02 || rms > 0.01;
-
-    if (drewSignal) {
-      const amp = Math.min(1.45, 0.5 + rms * 4.5);
-      const step = Math.max(1, Math.floor(n / Math.min(n, w)));
-
-      c2d.lineJoin = 'round';
-      c2d.lineCap = 'round';
-      c2d.strokeStyle = accent;
-      c2d.shadowColor = accent;
-
-      c2d.globalAlpha = 0.2 + rms * 0.4;
-      c2d.lineWidth = Math.max(3, (w / 900) * 6);
-      c2d.shadowBlur = 16 + rms * 36;
-      drawWavePath(timeData, w, midY, amp, step);
-      c2d.stroke();
-
-      c2d.globalAlpha = 0.9;
-      c2d.lineWidth = Math.max(1.2, (w / 900) * 2.1);
-      c2d.shadowBlur = 5;
-      drawWavePath(timeData, w, midY, amp, step);
-      c2d.stroke();
-
-      c2d.shadowBlur = 0;
-      c2d.globalAlpha = 1;
-    }
+  for (let i = 0; i <= pts; i++) {
+    const x = (i / pts) * w;
+    const n = i / pts;
+    // Layered sines → scope-like motion while music plays (visual only)
+    const y =
+      midY +
+      Math.sin(n * Math.PI * 6 + t * 4.2) * h * amp * 0.55 +
+      Math.sin(n * Math.PI * 14 + t * 7.1) * h * amp * 0.28 +
+      Math.sin(n * Math.PI * 2.2 + t * 1.7) * h * amp * 0.35;
+    if (i === 0) c2d.moveTo(x, y);
+    else c2d.lineTo(x, y);
   }
+  c2d.stroke();
 
-  if (!drewSignal) {
-    // Idle / no sample access — faint baseline (not fake music)
+  if (playing) {
     c2d.beginPath();
-    c2d.strokeStyle = accent;
-    c2d.globalAlpha = playing ? 0.18 : 0.12;
-    c2d.lineWidth = Math.max(1, w / 1200);
-    c2d.shadowColor = accent;
-    c2d.shadowBlur = 8;
-    const t = tNow * 0.001;
-    const pts = 120;
+    c2d.globalAlpha = 0.75;
+    c2d.lineWidth = Math.max(1, (w / 900) * 1.4);
+    c2d.shadowBlur = 4;
     for (let i = 0; i <= pts; i++) {
       const x = (i / pts) * w;
-      const y = midY + Math.sin(i * 0.35 + t * 0.6) * (h * 0.008);
+      const n = i / pts;
+      const y =
+        midY +
+        Math.sin(n * Math.PI * 6 + t * 4.2) * h * amp * 0.55 +
+        Math.sin(n * Math.PI * 14 + t * 7.1) * h * amp * 0.28 +
+        Math.sin(n * Math.PI * 2.2 + t * 1.7) * h * amp * 0.35;
       if (i === 0) c2d.moveTo(x, y);
       else c2d.lineTo(x, y);
     }
     c2d.stroke();
-    c2d.shadowBlur = 0;
-    c2d.globalAlpha = 1;
   }
 
+  c2d.shadowBlur = 0;
+  c2d.globalAlpha = 1;
   rafId = requestAnimationFrame(drawFrame);
+}
+
+/** Kept for API compatibility — does not touch audio elements. */
+export function prepareMediaElement(_audio) {}
+
+/** Kept for API compatibility — never routes audio (that muted previews). */
+export function connectMediaElement(_audio) {
+  return false;
 }
 
 export function startScope() {
   ensureCanvas();
-  ensureGraph();
-  try {
-    audioCtx?.resume?.().catch(() => {});
-  } catch {
-  }
   if (running) return;
   running = true;
   if (rafId) cancelAnimationFrame(rafId);
@@ -280,10 +168,6 @@ export function startScope() {
 
 export function kickScopeFromPlayback() {
   startScope();
-  try {
-    audioCtx?.resume?.().catch(() => {});
-  } catch {
-  }
 }
 
 export function stopScopeLoop() {
@@ -294,30 +178,16 @@ export function stopScopeLoop() {
   }
 }
 
-/** Soft-clear the canvas (e.g. after dispose). Does not close AudioContext. */
 export function clearScopeFrame() {
   if (!c2d || !canvas) return;
   c2d.clearRect(0, 0, canvas.width, canvas.height);
 }
 
-/**
- * On full media teardown we don't close AudioContext (expensive / user-gesture).
- * WeakMap drops sources when audio elements are GC'd after innerHTML swaps.
- */
-export function onMediaDisposed() {
-  // If nothing is playing, leave a quiet baseline; loop can keep idling cheaply
-  if (!anyMediaPlaying()) {
-    // keep scope running for idle line if already on
-  }
-}
+export function onMediaDisposed() {}
 
-// Resume drawing when tab is visible again
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-      startScope();
-    } else {
-      stopScopeLoop();
-    }
+    if (document.visibilityState === 'visible') startScope();
+    else stopScopeLoop();
   });
 }
