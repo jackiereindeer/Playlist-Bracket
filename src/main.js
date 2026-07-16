@@ -13,6 +13,19 @@ import {
   startScope,
   onMediaDisposed,
 } from './scope.js';
+import {
+  isYouTubeTrack,
+  youtubeVideoId,
+  loadYouTubeApi,
+  mountYouTubePlayer,
+  destroyYouTubePlayer,
+  destroyAllYouTubePlayers,
+  pauseAllYouTubeExcept,
+  setYouTubeVolume,
+  youtubeIsPlaying,
+  playYouTube,
+  pauseYouTube,
+} from './youtube-players.js';
 
 const app = document.querySelector('#app');
 
@@ -350,16 +363,35 @@ function hardStopAudio(audio) {
 function disposeMedia({ removeTransition = false } = {}) {
   for (const side of ['a', 'b', 'champion', 'transition']) {
     const audio = document.getElementById(`audio-${side}`);
-    if (!audio) continue;
-    hardStopAudio(audio);
-    if (side === 'transition' && removeTransition && audio.parentNode) {
-      try {
-        audio.parentNode.removeChild(audio);
-      } catch {
+    if (audio) {
+      hardStopAudio(audio);
+      if (side === 'transition' && removeTransition && audio.parentNode) {
+        try {
+          audio.parentNode.removeChild(audio);
+        } catch {
+        }
       }
     }
+    // Drop ephemeral YouTube iframes (not the champion bed)
+    if (side !== 'champion-bed') destroyYouTubePlayer(side);
   }
+  destroyYouTubePlayer('transition');
   onMediaDisposed();
+}
+
+function pauseAllHtmlAudioExcept(exceptSide = null) {
+  for (const side of ['a', 'b', 'champion', 'transition']) {
+    if (exceptSide && side === exceptSide) continue;
+    const o = document.getElementById(`audio-${side}`);
+    if (o && !o.paused) {
+      o.pause();
+      if (side !== 'transition') setPlayingUi(side, false);
+    }
+  }
+  const bed = document.getElementById('audio-champion-bed');
+  if (exceptSide !== 'champion-bed' && bed && !bed.paused) {
+    bed.pause();
+  }
 }
 
 /** Persistent champion player — lives outside #app so re-renders don't kill it. */
@@ -395,6 +427,14 @@ function championBedIsPlaying(songId) {
 
 function stopChampionBed() {
   championBedLoad = null;
+  destroyYouTubePlayer('champion-bed');
+  const host = document.getElementById('yt-champion-bed');
+  if (host?.parentNode) {
+    try {
+      host.parentNode.removeChild(host);
+    } catch {
+    }
+  }
   const audio = document.getElementById('audio-champion-bed');
   if (!audio) return;
   try {
@@ -410,15 +450,35 @@ function stopChampionBed() {
   }
 }
 
+function ensureYouTubeBedHost() {
+  let host = document.getElementById('yt-champion-bed');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'yt-champion-bed';
+    host.className = 'yt-bed-host';
+    host.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(host);
+  }
+  return host;
+}
+
 /**
  * Champion bed outside #app — starts on reveal, keeps playing into results.
- * Wired through Web Audio so the real scope can read samples.
+ * Spotify → HTML audio + Web Audio scope; YouTube → IFrame player.
  */
 function playChampionBed(song, volume01 = DEFAULT_TRANSITION_VOLUME) {
   if (!isSongLike(song)) return Promise.resolve(null);
 
   const vol = volumeForTrack(song.id, volume01);
   rememberTrackVolume(song.id, vol);
+
+  if (isYouTubeTrack(song)) {
+    return playChampionBedYouTube(song, vol);
+  }
+
+  // Stop any YT bed if switching sources mid-session
+  destroyYouTubePlayer('champion-bed');
+
   const audio = getChampionBed();
   audio.loop = true;
   audio.volume = vol;
@@ -486,6 +546,53 @@ function playChampionBed(song, volume01 = DEFAULT_TRANSITION_VOLUME) {
   return promise;
 }
 
+function playChampionBedYouTube(song, vol) {
+  const vid = youtubeVideoId(song);
+  if (!vid) return Promise.resolve(null);
+
+  // Already playing this video on the bed
+  if (youtubeIsPlaying('champion-bed') && championBedLoad?.id === song.id) {
+    setYouTubeVolume('champion-bed', vol);
+    return Promise.resolve(true);
+  }
+
+  if (championBedLoad?.id === song.id && championBedLoad.promise) {
+    return championBedLoad.promise.then(() => {
+      setYouTubeVolume('champion-bed', vol);
+      return true;
+    });
+  }
+
+  ensureYouTubeBedHost();
+  // Stop HTML champion bed audio so they don't stack
+  const audio = document.getElementById('audio-champion-bed');
+  if (audio) {
+    try {
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+    } catch {
+    }
+  }
+
+  pauseAllHtmlAudioExcept(null);
+  pauseAllYouTubeExcept('champion-bed');
+
+  const promise = mountYouTubePlayer('champion-bed', vid, {
+    volume01: vol,
+    autoplay: true,
+  }).then((p) => {
+    setYouTubeVolume('champion-bed', vol);
+    return p;
+  });
+
+  championBedLoad = { id: song.id, promise };
+  promise.finally(() => {
+    if (championBedLoad?.id === song.id) championBedLoad = null;
+  });
+  return promise;
+}
+
 function takeNextTransitionSong() {
   if (!playlistTracks.length) return null;
   const song = playlistTracks[transitionSongIndex % playlistTracks.length];
@@ -497,6 +604,28 @@ function takeNextTransitionSong() {
 function playAutoPreview(song, volume, gen) {
   if (!song?.id) return;
   const vol = volumeForTrack(song.id, volume);
+
+  if (isYouTubeTrack(song)) {
+    const vid = youtubeVideoId(song);
+    if (!vid) return;
+    let host = document.getElementById('yt-transition');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'yt-transition';
+      host.className = 'yt-bed-host';
+      host.setAttribute('aria-hidden', 'true');
+      document.body.appendChild(host);
+    }
+    if (gen !== renderGeneration) return;
+    pauseAllHtmlAudioExcept(null);
+    pauseAllYouTubeExcept('transition');
+    mountYouTubePlayer('transition', vid, {
+      volume01: vol,
+      autoplay: true,
+    }).catch(() => {});
+    return;
+  }
+
   ensurePreviewUrl(song.id).then((url) => {
     if (gen !== renderGeneration || !url) return;
     let audio = document.getElementById('audio-transition');
@@ -654,12 +783,12 @@ function renderSetup() {
       <div class="card setup-card">
         <form class="setup-form" id="setup-form">
           <div class="field">
-            <label for="playlist-url">Spotify playlist link</label>
+            <label for="playlist-url">Playlist link</label>
             <input
               id="playlist-url"
               name="url"
               type="url"
-              placeholder="https://open.spotify.com/playlist/…"
+              placeholder="Spotify or YouTube playlist URL…"
               required
               autocomplete="off"
             />
@@ -688,7 +817,7 @@ function renderSetup() {
           ${
             error
               ? `<div class="error-box" role="alert">${escapeHtml(error)}</div>`
-              : `<p class="setup-note">Playlist must be public.</p>`
+              : `<p class="setup-note">Public Spotify or YouTube playlist. YouTube needs a free API key on the server.</p>`
           }
 
           <div class="form-actions">
@@ -805,11 +934,12 @@ function songCardHtml(song, side) {
   volumeBySide[side] = vol;
   const pct = Math.round(vol * 100);
   const nameSize = nameFontSize(song.name);
+  const yt = isYouTubeTrack(song);
   const art = song.image
     ? `<img class="cover-art-img" src="${escapeHtml(song.image)}" alt="" />`
-    : `<div class="cover-art-fallback" aria-hidden="true">🎵</div>`;
+    : `<div class="cover-art-fallback" aria-hidden="true">${yt ? '▶' : '🎵'}</div>`;
   return `
-    <article class="song-card" data-side="${side}">
+    <article class="song-card${yt ? ' song-card-yt' : ''}" data-side="${side}" data-source="${yt ? 'youtube' : 'spotify'}">
       <div class="card-action-slot volume-control">
         <span class="volume-icon" aria-hidden="true">🔊</span>
         <input
@@ -826,15 +956,19 @@ function songCardHtml(song, side) {
       </div>
       <div class="song-meta">
         <h3 style="font-size:${nameSize}">${escapeHtml(song.name)}</h3>
-        <p>${escapeHtml(song.artists)}</p>
+        <p>${escapeHtml(song.artists)}${yt ? ' · YouTube' : ''}</p>
       </div>
-      <div class="cover-player">
-        <audio id="audio-${side}" preload="none"></audio>
+      <div class="cover-player${yt ? ' cover-player-yt' : ''}" id="cover-player-${side}">
+        ${
+          yt
+            ? `<div class="yt-host" id="yt-${side}"></div>`
+            : `<audio id="audio-${side}" preload="none"></audio>`
+        }
         <button
           type="button"
           class="cover-play-btn"
           id="play-${side}"
-          aria-label="Play preview of ${escapeHtml(song.name)}"
+          aria-label="Play ${escapeHtml(song.name)}"
           disabled
         >
           <span class="cover-art">${art}</span>
@@ -903,27 +1037,150 @@ function setSideVolume(side, volume01, trackId = null) {
   if (label) label.textContent = `${pct}%`;
   const audio = document.getElementById(`audio-${side}`);
   if (audio) audio.volume = vol;
+  setYouTubeVolume(side, vol);
+  if (side === 'champion' || side === 'a') {
+    // champion UI may control bed
+    setYouTubeVolume('champion-bed', vol);
+  }
   saveProgress();
 }
 
 function setPlayingUi(side, playing) {
   const icon = document.getElementById(`play-icon-${side}`);
   const btn = document.getElementById(`play-${side}`);
+  const cover = document.getElementById(`cover-player-${side}`);
   if (icon) icon.textContent = playing ? '❚❚' : '▶';
   if (btn) btn.classList.toggle('is-playing', playing);
+  if (cover) cover.classList.toggle('is-yt-playing', Boolean(playing));
 }
 
 function stillCurrent(gen, el) {
   return gen === renderGeneration && el != null && el.isConnected;
 }
 
+function wireYouTubeOnePlayer(side, song, volumeKey, gen, options = {}) {
+  const { autoplay = false } = options;
+  const playBtn = document.getElementById(`play-${side}`);
+  const status = document.getElementById(`status-${side}`);
+  const slider = document.getElementById(`vol-${side}`);
+  const host = document.getElementById(`yt-${side}`);
+  const vid = youtubeVideoId(song);
+  if (!playBtn || !host || !vid) return;
+
+  const initialVol = volumeForTrack(
+    song.id,
+    side === 'champion'
+      ? DEFAULT_TRANSITION_VOLUME
+      : volumeBySide[volumeKey] ?? DEFAULT_MATCH_VOLUME
+  );
+  if (side === 'a' || side === 'b') volumeBySide[volumeKey] = initialVol;
+  if (slider) {
+    slider.value = String(Math.round(initialVol * 100));
+    const label = document.getElementById(`vol-pct-${side}`);
+    if (label) label.textContent = `${Math.round(initialVol * 100)}%`;
+  }
+
+  if (slider) {
+    slider.addEventListener('input', () => {
+      if (!stillCurrent(gen, slider)) return;
+      const vol = Number(slider.value) / 100;
+      if (side === 'a' || side === 'b') volumeBySide[volumeKey] = vol;
+      rememberTrackVolume(song.id, vol);
+      setYouTubeVolume(side, vol);
+      if (side === 'champion') setYouTubeVolume('champion-bed', vol);
+      const label = document.getElementById(`vol-pct-${side}`);
+      if (label) label.textContent = `${slider.value}%`;
+      saveProgress();
+    });
+  }
+
+  playBtn.disabled = true;
+  if (status) {
+    status.hidden = false;
+    status.textContent = 'Loading YouTube…';
+  }
+
+  loadYouTubeApi()
+    .then(() => {
+      if (!stillCurrent(gen, playBtn)) return null;
+      return mountYouTubePlayer(side, vid, {
+        volume01: initialVol,
+        autoplay: false,
+        onPlaying: () => {
+          if (!stillCurrent(gen, playBtn)) return;
+          setPlayingUi(side, true);
+        },
+        onPaused: () => {
+          if (!stillCurrent(gen, playBtn)) return;
+          setPlayingUi(side, false);
+        },
+        onEnded: () => {
+          if (!stillCurrent(gen, playBtn)) return;
+          setPlayingUi(side, false);
+        },
+      });
+    })
+    .then((player) => {
+      if (!stillCurrent(gen, playBtn)) return;
+      playBtn.disabled = false;
+      if (!player) {
+        playBtn.classList.add('no-preview');
+        if (status) {
+          status.hidden = false;
+          status.textContent = 'Could not load YouTube player';
+        }
+        return;
+      }
+      if (status) status.hidden = true;
+      setYouTubeVolume(side, initialVol);
+
+      playBtn.onclick = async () => {
+        if (!stillCurrent(gen, playBtn)) return;
+        if (youtubeIsPlaying(side)) {
+          pauseYouTube(side);
+          setPlayingUi(side, false);
+          return;
+        }
+        pauseAllHtmlAudioExcept(side);
+        pauseAllYouTubeExcept(side);
+        setYouTubeVolume(side, volumeForTrack(song.id, initialVol));
+        await playYouTube(side);
+        if (stillCurrent(gen, playBtn)) setPlayingUi(side, true);
+      };
+
+      if (autoplay) {
+        pauseAllHtmlAudioExcept(side);
+        pauseAllYouTubeExcept(side);
+        playYouTube(side).then(() => {
+          if (stillCurrent(gen, playBtn)) setPlayingUi(side, true);
+        });
+      }
+    })
+    .catch(() => {
+      if (!stillCurrent(gen, playBtn)) return;
+      playBtn.disabled = false;
+      playBtn.classList.add('no-preview');
+      if (status) {
+        status.hidden = false;
+        status.textContent = 'Could not load YouTube';
+      }
+    });
+}
+
 function wireOnePlayer(side, song, volumeKey, gen, options = {}) {
   const { autoplay = false } = options;
+  if (!isSongLike(song)) return;
+
+  if (isYouTubeTrack(song)) {
+    wireYouTubeOnePlayer(side, song, volumeKey, gen, options);
+    return;
+  }
+
   const audio = document.getElementById(`audio-${side}`);
   const playBtn = document.getElementById(`play-${side}`);
   const status = document.getElementById(`status-${side}`);
   const slider = document.getElementById(`vol-${side}`);
-  if (!audio || !playBtn || !isSongLike(song)) return;
+  if (!audio || !playBtn) return;
 
   const initialVol = volumeForTrack(
     song.id,
@@ -1015,14 +1272,8 @@ function setupPreviewPlayback(side, song, volumeKey, gen, audio, playBtn, status
   playBtn.classList.remove('no-preview');
 
   const pauseOthers = () => {
-    for (const other of ['a', 'b', 'champion', 'transition']) {
-      if (other === side) continue;
-      const o = document.getElementById(`audio-${other}`);
-      if (o && !o.paused) {
-        o.pause();
-        if (other !== 'transition') setPlayingUi(other, false);
-      }
-    }
+    pauseAllHtmlAudioExcept(side);
+    pauseAllYouTubeExcept(side);
   };
 
   const startPlay = async () => {
@@ -1103,28 +1354,28 @@ function wireSongPlayers(songA, songB, gen) {
 }
 
 function wireChampionBedUi(champion, gen) {
-  const audio = getChampionBed();
   const playBtn = document.getElementById('play-champion');
   const status = document.getElementById('status-champion');
   const slider = document.getElementById('vol-champion');
   if (!playBtn || !isSongLike(champion)) return;
 
-  // Keep volume from the reveal if bed is already running
-  const vol = championBedIsFor(champion.id)
-    ? audio.volume
-    : volumeForTrack(champion.id, DEFAULT_TRANSITION_VOLUME);
-  audio.volume = vol;
+  const yt = isYouTubeTrack(champion);
+  const audio = yt ? null : getChampionBed();
+  const vol =
+    !yt && championBedIsFor(champion.id) && audio
+      ? audio.volume
+      : volumeForTrack(champion.id, DEFAULT_TRANSITION_VOLUME);
+  if (audio) audio.volume = vol;
+
   if (slider) {
     slider.value = String(Math.round(vol * 100));
     const label = document.getElementById('vol-pct-champion');
     if (label) label.textContent = `${Math.round(vol * 100)}%`;
-  }
-
-  if (slider) {
     slider.addEventListener('input', () => {
       if (!stillCurrent(gen, slider)) return;
       const v = Number(slider.value) / 100;
-      audio.volume = v;
+      if (audio) audio.volume = v;
+      setYouTubeVolume('champion-bed', v);
       rememberTrackVolume(champion.id, v);
       const label = document.getElementById('vol-pct-champion');
       if (label) label.textContent = `${slider.value}%`;
@@ -1134,11 +1385,15 @@ function wireChampionBedUi(champion, gen) {
 
   const syncUi = () => {
     if (!stillCurrent(gen, playBtn)) return;
-    setPlayingUi('champion', !audio.paused && !audio.ended);
+    if (yt) setPlayingUi('champion', youtubeIsPlaying('champion-bed'));
+    else if (audio) setPlayingUi('champion', !audio.paused && !audio.ended);
   };
 
-  // If reveal already started this track, only bind UI — do not touch src/play
-  if (championBedIsPlaying(champion.id)) {
+  const alreadyGoing = yt
+    ? youtubeIsPlaying('champion-bed')
+    : championBedIsPlaying(champion.id);
+
+  if (alreadyGoing) {
     playBtn.disabled = false;
     playBtn.classList.remove('no-preview');
     if (status) status.hidden = true;
@@ -1147,9 +1402,8 @@ function wireChampionBedUi(champion, gen) {
     playBtn.disabled = true;
     if (status) {
       status.hidden = false;
-      status.textContent = 'Loading preview…';
+      status.textContent = yt ? 'Loading YouTube…' : 'Loading preview…';
     }
-    // start or wait for in-flight load; playChampionBed never resets same-track src
     playChampionBed(champion, vol).then((el) => {
       if (!stillCurrent(gen, playBtn)) return;
       if (!el) {
@@ -1157,7 +1411,7 @@ function wireChampionBedUi(champion, gen) {
         playBtn.classList.add('no-preview');
         if (status) {
           status.hidden = false;
-          status.textContent = 'No preview available';
+          status.textContent = yt ? 'Could not play YouTube' : 'No preview available';
         }
         return;
       }
@@ -1170,20 +1424,32 @@ function wireChampionBedUi(champion, gen) {
 
   playBtn.onclick = async () => {
     if (!stillCurrent(gen, playBtn)) return;
-    if (!audio.paused) {
+    if (yt) {
+      if (youtubeIsPlaying('champion-bed')) {
+        pauseYouTube('champion-bed');
+        setPlayingUi('champion', false);
+        return;
+      }
+      pauseAllHtmlAudioExcept(null);
+      pauseAllYouTubeExcept('champion-bed');
+      setYouTubeVolume('champion-bed', volumeForTrack(champion.id, vol));
+      await playYouTube('champion-bed');
+      if (stillCurrent(gen, playBtn)) setPlayingUi('champion', true);
+      return;
+    }
+
+    if (audio && !audio.paused) {
       audio.pause();
       setPlayingUi('champion', false);
       return;
     }
-    for (const id of ['audio-a', 'audio-b', 'audio-champion', 'audio-transition']) {
-      const o = document.getElementById(id);
-      if (o && !o.paused) o.pause();
-    }
+    pauseAllHtmlAudioExcept(null);
+    pauseAllYouTubeExcept(null);
     try {
-      if (championBedIsFor(champion.id)) {
+      if (championBedIsFor(champion.id) && audio) {
         await audio.play();
       } else {
-        await playChampionBed(champion, audio.volume);
+        await playChampionBed(champion, audio?.volume ?? vol);
       }
       kickScopeFromPlayback();
       if (!stillCurrent(gen, playBtn)) return;
@@ -1196,8 +1462,10 @@ function wireChampionBedUi(champion, gen) {
     }
   };
 
-  audio.onplay = syncUi;
-  audio.onpause = syncUi;
+  if (audio) {
+    audio.onplay = syncUi;
+    audio.onpause = syncUi;
+  }
 }
 
 function renderResults(gen) {
@@ -1247,10 +1515,21 @@ function renderResults(gen) {
           />
           <span class="volume-pct" id="vol-pct-champion">${champVolPct}%</span>
         </div>
-        <div class="cover-player champion-cover">
+        <div class="cover-player champion-cover${isYouTubeTrack(champion) ? ' cover-player-yt' : ''}" id="cover-player-champion">
+          ${
+            isYouTubeTrack(champion)
+              ? `<div class="yt-host yt-host-inline" id="yt-champion"></div>`
+              : `<audio id="audio-champion" preload="none"></audio>`
+          }
           <button
             type="button"
-            class="cover-play-btn${championBedIsPlaying(champion.id) ? ' is-playing' : ''}"
+            class="cover-play-btn${
+              (isYouTubeTrack(champion)
+                ? youtubeIsPlaying('champion-bed')
+                : championBedIsPlaying(champion.id))
+                ? ' is-playing'
+                : ''
+            }"
             id="play-champion"
             aria-label="Play or pause ${escapeHtml(champion.name)}"
           >
@@ -1258,11 +1537,13 @@ function renderResults(gen) {
               ${
                 champion.image
                   ? `<img class="cover-art-img" src="${escapeHtml(champion.image)}" alt="" />`
-                  : `<div class="cover-art-fallback" aria-hidden="true">🎵</div>`
+                  : `<div class="cover-art-fallback" aria-hidden="true">${isYouTubeTrack(champion) ? '▶' : '🎵'}</div>`
               }
             </span>
             <span class="cover-play-icon" id="play-icon-champion" aria-hidden="true">${
-              championBedIsPlaying(champion.id) ? '❚❚' : '▶'
+              (isYouTubeTrack(champion) ? youtubeIsPlaying('champion-bed') : championBedIsPlaying(champion.id))
+                ? '❚❚'
+                : '▶'
             }</span>
           </button>
           <p class="preview-status small muted" id="status-champion" hidden></p>
@@ -1476,7 +1757,7 @@ async function onStart(e) {
   const url = form.url?.value?.trim?.() || '';
   const seeding = form.seeding?.value === 'shuffle' ? 'shuffle' : 'order';
   if (!url) {
-    error = 'Paste a public Spotify playlist link.';
+    error = 'Paste a public Spotify or YouTube playlist link.';
     render();
     return;
   }
@@ -1514,6 +1795,10 @@ async function onStart(e) {
     transitionSongIndex = 0;
     clearTrackVolumes();
     state = createTournament(data, tracks, seeding);
+    // Warm YouTube API early when needed
+    if (data.source === 'youtube' || tracks.some(isYouTubeTrack)) {
+      loadYouTubeApi().catch(() => {});
+    }
     saveProgress({ immediate: true });
   } catch (err) {
     if (myLoad !== loadGeneration) return;
@@ -1581,6 +1866,7 @@ function onQuit() {
   roundTransition = null;
   disposeMedia({ removeTransition: true });
   stopChampionBed();
+  destroyAllYouTubePlayers();
   clearPreviewCache();
   clearSavedProgress();
   state = null;

@@ -8,6 +8,12 @@ import {
   fetchPublicPlaylist,
   fetchTrackPreview,
 } from './spotify-public.js';
+import {
+  extractYouTubePlaylistId,
+  isYouTubePlaylistUrl,
+  fetchYouTubePlaylist,
+  getApiKey as getYouTubeApiKey,
+} from './youtube-public.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -20,16 +26,35 @@ app.use(cors());
 app.use(express.json({ limit: '32kb' }));
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true });
+  res.json({
+    ok: true,
+    youtube: Boolean(getYouTubeApiKey()),
+  });
 });
 
 app.get('/api/playlist', async (req, res) => {
   try {
     const raw = String(req.query.url || req.query.id || '').slice(0, 500);
+
+    // YouTube playlist (list=… / PL…)
+    if (isYouTubePlaylistUrl(raw)) {
+      const ytId = extractYouTubePlaylistId(raw);
+      if (!ytId) {
+        return res.status(400).json({
+          error: 'Invalid YouTube playlist link.',
+        });
+      }
+      const playlist = await fetchYouTubePlaylist(ytId);
+      res.set('Cache-Control', 'private, max-age=60');
+      return res.json(playlist);
+    }
+
+    // Spotify playlist
     const playlistId = extractPlaylistId(raw);
     if (!playlistId) {
       return res.status(400).json({
-        error: 'Invalid playlist link. Paste a Spotify playlist URL (must be public).',
+        error:
+          'Invalid playlist link. Paste a public Spotify or YouTube playlist URL.',
       });
     }
 
@@ -39,6 +64,12 @@ app.get('/api/playlist', async (req, res) => {
       return res.status(400).json({
         error: 'Need at least 2 playable songs in the playlist to run a tournament.',
       });
+    }
+
+    // Normalize source tag for the client
+    playlist.source = playlist.source || 'spotify';
+    for (const t of playlist.tracks) {
+      if (!t.source) t.source = 'spotify';
     }
 
     res.set('Cache-Control', 'private, max-age=60');

@@ -902,14 +902,61 @@ body.on-setup {
 }
 
 .cover-player {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
   align-items: stretch;
   flex: 1 1 auto;
   min-height: 0;
-  
   width: 100%;
+}
+
+/* YouTube iframe sits under the cover art; fades in while playing */
+.yt-host {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  background: #000;
+}
+
+.yt-host iframe {
+  width: 100% !important;
+  height: 100% !important;
+  border: 0;
+}
+
+.cover-player-yt .cover-play-btn {
+  z-index: 1;
+}
+
+.cover-player-yt.is-yt-playing .yt-host {
+  opacity: 1;
+}
+
+.cover-player-yt.is-yt-playing .cover-art {
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.cover-player-yt.is-yt-playing .cover-play-icon {
+  opacity: 0.85;
+}
+
+/* Off-screen hosts for champion bed / transition stingers */
+.yt-bed-host {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  left: -9999px;
+  top: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .cover-play-btn {
