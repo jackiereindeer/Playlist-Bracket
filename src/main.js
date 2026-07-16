@@ -18,10 +18,20 @@ let transitionTimer = null;
 
 let volumeBySide = { a: 0.25, b: 0.25 };
 
+/** Last volume the user set for each track id (0–1). */
+const volumeByTrackId = Object.create(null);
+
 const previewCache = Object.create(null);
 
 let renderGeneration = 0;
 let loadGeneration = 0;
+
+/** Original playlist order for transition music (1st, 2nd, 3rd…). */
+let playlistTracks = [];
+let transitionSongIndex = 0;
+
+const DEFAULT_MATCH_VOLUME = 0.25;
+const DEFAULT_TRANSITION_VOLUME = 0.1;
 
 const STORAGE_KEY = 'playlist-bracket-save-v1';
 
@@ -85,6 +95,9 @@ function saveProgress() {
       savedAt: Date.now(),
       state: serializeState(state),
       volumeBySide: { ...volumeBySide },
+      volumeByTrackId: { ...volumeByTrackId },
+      playlistTracks,
+      transitionSongIndex,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   } catch {
@@ -95,6 +108,25 @@ function clearSavedProgress() {
   try {
     localStorage.removeItem(STORAGE_KEY);
   } catch {
+  }
+}
+
+function rememberTrackVolume(trackId, volume01) {
+  if (!trackId) return;
+  const vol = Math.min(1, Math.max(0, volume01));
+  volumeByTrackId[trackId] = vol;
+}
+
+function volumeForTrack(trackId, fallback = DEFAULT_TRANSITION_VOLUME) {
+  if (trackId && typeof volumeByTrackId[trackId] === 'number') {
+    return Math.min(1, Math.max(0, volumeByTrackId[trackId]));
+  }
+  return fallback;
+}
+
+function clearTrackVolumes() {
+  for (const key of Object.keys(volumeByTrackId)) {
+    delete volumeByTrackId[key];
   }
 }
 
@@ -117,6 +149,18 @@ function loadProgress() {
         a: Math.min(1, Math.max(0, payload.volumeBySide.a)),
         b: Math.min(1, Math.max(0, payload.volumeBySide.b)),
       };
+    }
+    if (payload.volumeByTrackId && typeof payload.volumeByTrackId === 'object') {
+      clearTrackVolumes();
+      for (const [id, v] of Object.entries(payload.volumeByTrackId)) {
+        if (typeof v === 'number') volumeByTrackId[id] = Math.min(1, Math.max(0, v));
+      }
+    }
+    if (Array.isArray(payload.playlistTracks)) {
+      playlistTracks = payload.playlistTracks;
+    }
+    if (typeof payload.transitionSongIndex === 'number') {
+      transitionSongIndex = Math.max(0, payload.transitionSongIndex);
     }
     return restored;
   } catch {
@@ -180,7 +224,7 @@ function clearPreviewCache() {
 }
 
 function disposeMedia() {
-  for (const side of ['a', 'b', 'champion']) {
+  for (const side of ['a', 'b', 'champion', 'transition']) {
     const audio = document.getElementById(`audio-${side}`);
     if (!audio) continue;
     try {
@@ -194,10 +238,43 @@ function disposeMedia() {
   }
 }
 
+function takeNextTransitionSong() {
+  if (!playlistTracks.length) return null;
+  const song = playlistTracks[transitionSongIndex % playlistTracks.length];
+  transitionSongIndex += 1;
+  saveProgress();
+  return song;
+}
+
+function playAutoPreview(song, volume, gen) {
+  if (!song?.id) return;
+  const vol = volumeForTrack(song.id, volume);
+  ensurePreviewUrl(song.id).then((url) => {
+    if (gen !== renderGeneration || !url) return;
+    let audio = document.getElementById('audio-transition');
+    if (!audio) {
+      audio = document.createElement('audio');
+      audio.id = 'audio-transition';
+      audio.setAttribute('playsinline', '');
+      document.body.appendChild(audio);
+    }
+    try {
+      audio.pause();
+      audio.volume = vol;
+      audio.src = url;
+      audio.play().catch(() => {});
+    } catch {
+    }
+  });
+}
+
 function scheduleTransition(payload, ms) {
   clearTransitionTimer();
   roundTransition = payload;
   render();
+  const gen = renderGeneration;
+  const song = payload.champion || payload.transitionSong;
+  if (song) playAutoPreview(song, DEFAULT_TRANSITION_VOLUME, gen);
   transitionTimer = setTimeout(() => {
     transitionTimer = null;
     roundTransition = null;
@@ -320,6 +397,11 @@ function renderRoundTransition() {
   if (!t) return;
   const stage = stageFromRemaining(t.remaining);
   const isChampion = Boolean(t.champion);
+  const label = t.toLabel || '';
+  const redundantSub =
+    /songs left$/i.test(label) ||
+    /^\d+\s+songs$/i.test(label) ||
+    label === `${t.remaining} songs left`;
 
   if (isChampion) {
     const c = t.champion;
@@ -342,8 +424,12 @@ function renderRoundTransition() {
   app.innerHTML = `
     <div class="round-transition stage-${escapeHtml(stage)}" role="status" aria-live="polite">
       <div class="round-transition-divider" aria-hidden="true"></div>
-      <p class="round-transition-to">${escapeHtml(t.toLabel)}</p>
-      <p class="round-transition-sub">${t.remaining} songs left</p>
+      <p class="round-transition-to">${escapeHtml(label)}</p>
+      ${
+        redundantSub
+          ? ''
+          : `<p class="round-transition-sub">${t.remaining} songs left</p>`
+      }
     </div>
   `;
 }
@@ -402,7 +488,8 @@ function nameFontSize(name) {
 }
 
 function songCardHtml(song, side) {
-  const vol = volumeBySide[side] ?? 0.25;
+  const vol = volumeForTrack(song.id, volumeBySide[side] ?? DEFAULT_MATCH_VOLUME);
+  volumeBySide[side] = vol;
   const pct = Math.round(vol * 100);
   const nameSize = nameFontSize(song.name);
   const art = song.image
@@ -476,9 +563,10 @@ async function ensurePreviewUrl(trackId) {
   return null;
 }
 
-function setSideVolume(side, volume01) {
+function setSideVolume(side, volume01, trackId = null) {
   const vol = Math.min(1, Math.max(0, volume01));
   if (side === 'a' || side === 'b') volumeBySide[side] = vol;
+  if (trackId) rememberTrackVolume(trackId, vol);
   const pct = Math.round(vol * 100);
   const label = document.getElementById(`vol-pct-${side}`);
   if (label) label.textContent = `${pct}%`;
@@ -504,17 +592,29 @@ function wireOnePlayer(side, song, volumeKey, gen) {
   const slider = document.getElementById(`vol-${side}`);
   if (!audio || !playBtn) return;
 
-  const initialVol = volumeBySide[volumeKey] ?? 0.25;
+  const initialVol = volumeForTrack(
+    song.id,
+    volumeBySide[volumeKey] ?? DEFAULT_MATCH_VOLUME
+  );
+  volumeBySide[volumeKey] = initialVol;
   audio.volume = initialVol;
+  if (slider) {
+    slider.value = String(Math.round(initialVol * 100));
+    const label = document.getElementById(`vol-pct-${side}`);
+    if (label) label.textContent = `${Math.round(initialVol * 100)}%`;
+  }
 
   if (slider) {
     slider.addEventListener('input', () => {
       if (!stillCurrent(gen, slider)) return;
-      setSideVolume(side === 'champion' ? 'champion' : volumeKey, Number(slider.value) / 100);
+      const vol = Number(slider.value) / 100;
       if (side === 'champion') {
-        audio.volume = Number(slider.value) / 100;
+        rememberTrackVolume(song.id, vol);
+        audio.volume = vol;
         const label = document.getElementById('vol-pct-champion');
         if (label) label.textContent = `${slider.value}%`;
+      } else {
+        setSideVolume(volumeKey, vol, song.id);
       }
     });
   }
@@ -590,10 +690,14 @@ function setupPreviewPlayback(side, song, volumeKey, gen, audio, playBtn, status
     }
 
     try {
-      audio.volume =
+      audio.volume = volumeForTrack(
+        song.id,
         side === 'champion'
-          ? Number(document.getElementById('vol-champion')?.value || 25) / 100
-          : volumeBySide[volumeKey] ?? 0.25;
+          ? Number(document.getElementById('vol-champion')?.value || 10) / 100
+          : volumeBySide[volumeKey] ?? DEFAULT_MATCH_VOLUME
+      );
+      rememberTrackVolume(song.id, audio.volume);
+      saveProgress();
       await audio.play();
       if (!stillCurrent(gen, playBtn)) {
         audio.pause();
@@ -652,10 +756,10 @@ function renderResults(gen) {
             min="0"
             max="100"
             step="1"
-            value="${Math.round((volumeBySide.a ?? 0.25) * 100)}"
+            value="${Math.round(volumeForTrack(champion.id, DEFAULT_TRANSITION_VOLUME) * 100)}"
             aria-label="Volume for champion"
           />
-          <span class="volume-pct" id="vol-pct-champion">${Math.round((volumeBySide.a ?? 0.25) * 100)}%</span>
+          <span class="volume-pct" id="vol-pct-champion">${Math.round(volumeForTrack(champion.id, DEFAULT_TRANSITION_VOLUME) * 100)}%</span>
         </div>
         <div class="cover-player champion-cover">
           <audio id="audio-champion" preload="none"></audio>
@@ -698,6 +802,22 @@ function renderResults(gen) {
   document.getElementById('copy-btn').addEventListener('click', onCopySummary);
   document.getElementById('again-btn').addEventListener('click', onQuit);
   wireOnePlayer('champion', champion, 'a', gen);
+
+  // Auto-play champion at the volume the user last set for that track
+  const champAudio = document.getElementById('audio-champion');
+  if (champAudio) {
+    const champVol = volumeForTrack(champion.id, DEFAULT_TRANSITION_VOLUME);
+    ensurePreviewUrl(champion.id).then((url) => {
+      if (gen !== renderGeneration || !url || !champAudio.isConnected) return;
+      champAudio.volume = champVol;
+      const slider = document.getElementById('vol-champion');
+      const label = document.getElementById('vol-pct-champion');
+      if (slider) slider.value = String(Math.round(champVol * 100));
+      if (label) label.textContent = `${Math.round(champVol * 100)}%`;
+      champAudio.src = url;
+      champAudio.play().then(() => setPlayingUi('champion', true)).catch(() => {});
+    });
+  }
 }
 
 function mmRoundLabel(matches, initialCount) {
@@ -909,6 +1029,9 @@ async function onStart(e) {
   roundTransition = null;
   clearPreviewCache();
   state = null;
+  playlistTracks = [];
+  transitionSongIndex = 0;
+  clearTrackVolumes();
 
   loading = true;
   render();
@@ -921,6 +1044,9 @@ async function onStart(e) {
     }
     if (myLoad !== loadGeneration) return;
 
+    playlistTracks = Array.isArray(data.tracks) ? data.tracks : [];
+    transitionSongIndex = 0;
+    clearTrackVolumes();
     state = createTournament(data, data.tracks, seeding);
     shareMsg = '';
     saveProgress();
@@ -928,6 +1054,9 @@ async function onStart(e) {
     if (myLoad !== loadGeneration) return;
     error = err.message || 'Could not start tournament.';
     state = null;
+    playlistTracks = [];
+    transitionSongIndex = 0;
+    clearTrackVolumes();
     clearSavedProgress();
   } finally {
     if (myLoad !== loadGeneration) return;
@@ -970,6 +1099,7 @@ function onPick(side) {
         fromLabel,
         toLabel: progress(state).roundLabel,
         remaining: state.remaining,
+        transitionSong: takeNextTransitionSong(),
       },
       2200
     );
@@ -986,6 +1116,9 @@ function onQuit() {
   clearPreviewCache();
   clearSavedProgress();
   state = null;
+  playlistTracks = [];
+  transitionSongIndex = 0;
+  clearTrackVolumes();
   error = '';
   shareMsg = '';
   clearStageVibe();
