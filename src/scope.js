@@ -85,12 +85,13 @@ function ensureGraph() {
 }
 
 /**
- * Must be called before setting audio.src for CORS waveform data.
+ * Optional CORS for analyser sample access. Do NOT force this on every element —
+ * Spotify preview CDN often plays fine without it, and forcing anonymous can
+ * block the load entirely (silent champion bed).
  */
-export function prepareMediaElement(audio) {
-  if (!audio) return;
+export function prepareMediaElement(audio, { cors = false } = {}) {
+  if (!audio || !cors) return;
   try {
-    // Required so MediaElementSource can read samples from scdn.co previews
     if (!audio.crossOrigin) audio.crossOrigin = 'anonymous';
   } catch {
   }
@@ -99,15 +100,18 @@ export function prepareMediaElement(audio) {
 /**
  * Route an <audio> element through the analyser graph (once per element).
  * After this, playback goes through Web Audio (element.volume still works).
+ * @param {{ cors?: boolean }} options - cors:true only when you need live waveform samples
  */
-export function connectMediaElement(audio) {
+export function connectMediaElement(audio, options = {}) {
   if (!audio) return false;
-  prepareMediaElement(audio);
+  const { cors = false } = options;
+  prepareMediaElement(audio, { cors });
   const ctx = ensureGraph();
   if (!ctx || !masterGain) return false;
 
   try {
     if (ctx.state === 'suspended') {
+      // Fire-and-forget; callers should also await resumeAudioContext()
       ctx.resume().catch(() => {});
     }
   } catch {
@@ -121,7 +125,19 @@ export function connectMediaElement(audio) {
     sources.set(audio, src);
     return true;
   } catch {
-    // Already connected elsewhere, or CORS / browser restriction
+    // Already connected elsewhere, or browser restriction
+    return false;
+  }
+}
+
+/** Resume the shared AudioContext (required after autoplay / tab sleep). */
+export async function resumeAudioContext() {
+  const ctx = ensureGraph();
+  if (!ctx) return false;
+  try {
+    if (ctx.state === 'suspended') await ctx.resume();
+    return ctx.state === 'running';
+  } catch {
     return false;
   }
 }

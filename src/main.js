@@ -8,6 +8,7 @@ import {
 import {
   prepareMediaElement,
   connectMediaElement,
+  resumeAudioContext,
   kickScopeFromPlayback,
   startScope,
   onMediaDisposed,
@@ -403,15 +404,29 @@ function stopChampionBed() {
     audio.onplay = null;
     audio.onpause = null;
     delete audio.dataset.trackId;
+    delete audio.dataset.previewUrl;
     audio.removeAttribute('src');
     audio.load();
   } catch {
   }
 }
 
+async function tryPlayElement(audio) {
+  await resumeAudioContext();
+  kickScopeFromPlayback();
+  try {
+    await audio.play();
+    return true;
+  } catch {
+    // Autoplay may still be blocked; caller can retry on user gesture
+    return false;
+  }
+}
+
 /**
- * Start champion audio once and never restart it for the same track.
- * Re-renders / results handoff only adjust volume — they never touch src.
+ * Start champion audio once and keep it going through results.
+ * Prefers reliable native playback (no forced CORS) so the bed is never silent.
+ * Does not reassign src for the same track (avoids restart glitches).
  */
 function playChampionBed(song, volume01 = DEFAULT_TRANSITION_VOLUME, { resumeIfPaused = true } = {}) {
   if (!isSongLike(song)) return Promise.resolve(null);
@@ -420,65 +435,67 @@ function playChampionBed(song, volume01 = DEFAULT_TRANSITION_VOLUME, { resumeIfP
   rememberTrackVolume(song.id, vol);
   const audio = getChampionBed();
   audio.loop = true;
-  // Volume-only touch — never resets playback position
   audio.volume = vol;
 
-  // Already loaded this track: do not set src again (that restarts from 0)
+  // Already loaded this track — only resume if needed, never reset src
   if (championBedIsFor(song.id)) {
     if (resumeIfPaused && audio.paused) {
-      return audio
-        .play()
-        .then(() => {
-          kickScopeFromPlayback();
-          return audio;
-        })
-        .catch(() => audio);
+      return tryPlayElement(audio).then(() => audio);
     }
     kickScopeFromPlayback();
     return Promise.resolve(audio);
   }
 
-  // Share one in-flight load so reveal + results never double-assign src
   if (championBedLoad?.id === song.id) {
     return championBedLoad.promise.then((el) => {
-      if (el) el.volume = vol;
+      if (el) {
+        el.volume = vol;
+        if (resumeIfPaused && el.paused) return tryPlayElement(el).then(() => el);
+      }
       return el;
     });
   }
 
-  // Reserve the track id immediately so concurrent callers see "in progress"
   audio.dataset.trackId = song.id;
 
   const promise = ensurePreviewUrl(song.id)
-    .then((url) => {
+    .then(async (url) => {
       if (!url) {
         delete audio.dataset.trackId;
         return null;
       }
-      // Quit/start-over may have cleared the bed mid-fetch
       if (audio.dataset.trackId !== song.id) return null;
 
-      // Another completion already armed this element
+      // Same track already armed by a racing caller
       if (audio.currentSrc && audio.dataset.trackId === song.id) {
         audio.volume = vol;
-        if (resumeIfPaused && audio.paused) {
-          return audio.play().then(() => {
-            kickScopeFromPlayback();
-            return audio;
-          });
-        }
+        if (resumeIfPaused && audio.paused) await tryPlayElement(audio);
         return audio;
       }
 
-      prepareMediaElement(audio);
       audio.loop = true;
       audio.volume = vol;
+      audio.dataset.previewUrl = url;
+
+      // No crossOrigin — Spotify previews often fail to load when forced anonymous,
+      // which left the champion bed completely silent.
+      try {
+        audio.removeAttribute('crossorigin');
+      } catch {
+      }
       audio.src = url;
-      connectMediaElement(audio);
-      return audio.play().then(() => {
-        kickScopeFromPlayback();
-        return audio;
-      });
+
+      // Route through Web Audio for the scope when possible (without CORS requirement)
+      connectMediaElement(audio, { cors: false });
+
+      const ok = await tryPlayElement(audio);
+      if (!ok && audio.error) {
+        // Last-ditch: reload once
+        audio.src = url;
+        connectMediaElement(audio, { cors: false });
+        await tryPlayElement(audio);
+      }
+      return audio;
     })
     .catch(() => {
       if (audio.dataset.trackId === song.id) delete audio.dataset.trackId;
@@ -515,13 +532,17 @@ function playAutoPreview(song, volume, gen) {
     }
     try {
       hardStopAudio(audio);
-      prepareMediaElement(audio);
+      // Transition stingers: prefer audible playback over CORS waveform
+      try {
+        audio.removeAttribute('crossorigin');
+      } catch {
+      }
       audio.volume = vol;
       audio.src = url;
-      connectMediaElement(audio);
-      audio.play()
-        .then(() => kickScopeFromPlayback())
-        .catch(() => {});
+      connectMediaElement(audio, { cors: false });
+      resumeAudioContext().then(() => {
+        audio.play().then(() => kickScopeFromPlayback()).catch(() => {});
+      });
     } catch {
     }
   });
@@ -1014,10 +1035,14 @@ function wireOnePlayer(side, song, volumeKey, gen, options = {}) {
 
 function setupPreviewPlayback(side, song, volumeKey, gen, audio, playBtn, status, url, options = {}) {
   const { autoplay = false } = options;
-  // crossOrigin before src so the analyser can read real samples from CDN audio
-  prepareMediaElement(audio);
+  // Prefer audible previews; scope still works via MediaElementSource without CORS
+  // (waveform samples may be silent if CDN blocks CORS — sound still plays)
+  try {
+    audio.removeAttribute('crossorigin');
+  } catch {
+  }
   audio.src = url;
-  connectMediaElement(audio);
+  connectMediaElement(audio, { cors: false });
   playBtn.disabled = false;
   playBtn.classList.remove('no-preview');
 
@@ -1043,7 +1068,8 @@ function setupPreviewPlayback(side, song, volumeKey, gen, audio, playBtn, status
           : volumeBySide[volumeKey] ?? DEFAULT_MATCH_VOLUME
       );
       rememberTrackVolume(song.id, audio.volume);
-      connectMediaElement(audio);
+      connectMediaElement(audio, { cors: false });
+      await resumeAudioContext();
       kickScopeFromPlayback();
       await audio.play();
       if (!stillCurrent(gen, playBtn)) {
@@ -1115,7 +1141,7 @@ function wireChampionBedUi(champion, gen) {
   const slider = document.getElementById('vol-champion');
   if (!playBtn || !isSongLike(champion)) return;
 
-  // Keep whatever volume the bed is already using (seamless from reveal)
+  // Keep bed volume if already running; otherwise default transition volume
   const vol = championBedIsFor(champion.id)
     ? audio.volume
     : volumeForTrack(champion.id, DEFAULT_TRANSITION_VOLUME);
@@ -1143,62 +1169,37 @@ function wireChampionBedUi(champion, gen) {
     setPlayingUi('champion', !audio.paused && !audio.ended);
   };
 
-  const alreadyGoing = championBedIsPlaying(champion.id);
+  playBtn.disabled = true;
+  if (status && !championBedIsPlaying(champion.id)) {
+    status.hidden = false;
+    status.textContent = 'Loading preview…';
+  }
 
-  if (alreadyGoing) {
-    // Do not call play()/src — just bind controls to the live stream
+  // Always ensure bed is started/resumed — never reassigns src if same track
+  playChampionBed(champion, vol, { resumeIfPaused: true }).then((el) => {
+    if (!stillCurrent(gen, playBtn)) return;
+    if (!el || (!el.currentSrc && !championBedLoad)) {
+      playBtn.disabled = false;
+      // Still allow a manual retry click
+      if (!el?.currentSrc) {
+        playBtn.classList.add('no-preview');
+        if (status) {
+          status.hidden = false;
+          status.textContent = 'Tap cover to play champion';
+        }
+      }
+      syncUi();
+      return;
+    }
     playBtn.disabled = false;
     playBtn.classList.remove('no-preview');
     if (status) status.hidden = true;
-    setPlayingUi('champion', true);
-  } else if (championBedIsFor(champion.id) || championBedLoad?.id === champion.id) {
-    // Loaded or loading from reveal — wait, never reassign src
-    playBtn.disabled = true;
-    if (status) {
-      status.hidden = false;
-      status.textContent = 'Loading preview…';
+    syncUi();
+    // One more resume attempt if autoplay was blocked mid-handoff
+    if (el.paused) {
+      tryPlayElement(el).then(syncUi);
     }
-    const pending = championBedLoad?.id === champion.id
-      ? championBedLoad.promise
-      : playChampionBed(champion, vol, { resumeIfPaused: true });
-    Promise.resolve(pending).then((el) => {
-      if (!stillCurrent(gen, playBtn)) return;
-      if (!el) {
-        playBtn.disabled = false;
-        playBtn.classList.add('no-preview');
-        if (status) {
-          status.hidden = false;
-          status.textContent = 'No preview available';
-        }
-        return;
-      }
-      playBtn.disabled = false;
-      if (status) status.hidden = true;
-      syncUi();
-    });
-  } else {
-    // Cold start (e.g. restored finished save) — start bed once
-    playBtn.disabled = true;
-    if (status) {
-      status.hidden = false;
-      status.textContent = 'Loading preview…';
-    }
-    playChampionBed(champion, vol, { resumeIfPaused: true }).then((el) => {
-      if (!stillCurrent(gen, playBtn)) return;
-      if (!el) {
-        playBtn.disabled = false;
-        playBtn.classList.add('no-preview');
-        if (status) {
-          status.hidden = false;
-          status.textContent = 'No preview available';
-        }
-        return;
-      }
-      playBtn.disabled = false;
-      if (status) status.hidden = true;
-      syncUi();
-    });
-  }
+  });
 
   playBtn.onclick = async () => {
     if (!stillCurrent(gen, playBtn)) return;
@@ -1212,15 +1213,25 @@ function wireChampionBedUi(champion, gen) {
       if (o && !o.paused) o.pause();
     }
     try {
-      // Resume only — never reload src
+      await resumeAudioContext();
       if (!championBedIsFor(champion.id)) {
         await playChampionBed(champion, audio.volume, { resumeIfPaused: true });
       } else {
-        kickScopeFromPlayback();
-        await audio.play();
+        const ok = await tryPlayElement(audio);
+        if (!ok) {
+          // Hard recovery: reload same preview URL once on user gesture
+          const url = audio.dataset.previewUrl || (await ensurePreviewUrl(champion.id));
+          if (url) {
+            audio.src = url;
+            connectMediaElement(audio, { cors: false });
+            await tryPlayElement(audio);
+          }
+        }
       }
       if (!stillCurrent(gen, playBtn)) return;
-      setPlayingUi('champion', true);
+      setPlayingUi('champion', !audio.paused);
+      if (status) status.hidden = true;
+      playBtn.classList.remove('no-preview');
     } catch {
       if (stillCurrent(gen, status) && status) {
         status.hidden = false;
