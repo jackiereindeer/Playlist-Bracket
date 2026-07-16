@@ -23,6 +23,10 @@ import {
   setYouTubeVolume,
   pauseYouTube,
 } from '../youtube-players.js';
+import {
+  buildRatingResultsImageBlob,
+  copyOrDownloadRatingImage,
+} from '../rating-export-image.js';
 import { buildPartyBracketHtml, wirePartyBracketTabs } from './party-bracket.js';
 
 /**
@@ -2234,7 +2238,8 @@ export function startPartyApp(root, opts) {
               }</div>`
         }
         <div class="form-actions rating-results-actions">
-          <button type="button" class="ghost" id="gr-export">Copy results</button>
+          <button type="button" class="ghost" id="gr-export">Copy text</button>
+          <button type="button" id="gr-export-image">Copy image</button>
           <button type="button" id="gr-continue" ${myReady ? 'disabled' : ''}>
             ${myReady ? `Waiting for others… (${ready}/${readyTotal})` : `Continue (${ready}/${readyTotal})`}
           </button>
@@ -2948,6 +2953,38 @@ export function startPartyApp(root, opts) {
         const text = lines.join('\n');
         const btn = root.querySelector('#gr-export');
         await copyText(text, btn, 'Copied!');
+      });
+      root.querySelector('#gr-export-image')?.addEventListener('click', async () => {
+        const btn = root.querySelector('#gr-export-image');
+        const gr = s.groupRate || {};
+        const ranking = gr.ranking || [];
+        if (!btn || !ranking.length) return;
+        const prev = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Making image…';
+        try {
+          // Image overlays use **group average** on each album
+          const ranked = ranking.map((row) => ({
+            song: row.song || {},
+            rating: row.average,
+          }));
+          const title =
+            gr.playlistName || s.playlist?.name || 'Group Rate';
+          const blob = await buildRatingResultsImageBlob(ranked, title, {
+            modeLabel: 'Group Rate',
+          });
+          await copyOrDownloadRatingImage(blob, btn, 'group-rate-results');
+        } catch {
+          btn.textContent = 'Image failed';
+          setTimeout(() => {
+            if (btn.isConnected) {
+              btn.textContent = prev;
+              btn.disabled = false;
+            }
+          }, 2000);
+          return;
+        }
+        btn.disabled = false;
       });
       root.querySelector('#gr-rematch')?.addEventListener('click', () => {
         hardStopAudio();
