@@ -43,6 +43,11 @@ let saveTimer = null;
 /** In-flight champion bed load so we never double-set src (which restarts audio). */
 let championBedLoad = null; // { id, promise }
 
+/** Active volume fades (key → rAF id). */
+const fadeRafs = new Map();
+const FADE_IN_MS = 550;
+const FADE_OUT_MS = 500;
+
 let volumeBySide = { a: 0.25, b: 0.25 };
 
 /** Last volume the user set for each track id (0–1). */
@@ -364,6 +369,156 @@ function hardStopAudio(audio) {
   }
 }
 
+function cancelFade(key) {
+  const id = fadeRafs.get(key);
+  if (id != null) cancelAnimationFrame(id);
+  fadeRafs.delete(key);
+}
+
+function cancelAllFades() {
+  for (const key of [...fadeRafs.keys()]) cancelFade(key);
+}
+
+function easeSmooth(t) {
+  // Smoothstep
+  return t * t * (3 - 2 * t);
+}
+
+/** Fade an HTMLMediaElement volume from → to over ms. */
+function fadeHtmlVolume(audio, from, to, ms, key) {
+  return new Promise((resolve) => {
+    if (!audio) {
+      resolve();
+      return;
+    }
+    cancelFade(key);
+    const startVol = Math.min(1, Math.max(0, from));
+    const endVol = Math.min(1, Math.max(0, to));
+    const start = performance.now();
+    try {
+      audio.volume = startVol;
+    } catch {
+    }
+
+    const tick = (now) => {
+      const t = ms <= 0 ? 1 : Math.min(1, (now - start) / ms);
+      const v = startVol + (endVol - startVol) * easeSmooth(t);
+      try {
+        audio.volume = v;
+      } catch {
+      }
+      if (t < 1) {
+        fadeRafs.set(key, requestAnimationFrame(tick));
+      } else {
+        fadeRafs.delete(key);
+        try {
+          audio.volume = endVol;
+        } catch {
+        }
+        resolve();
+      }
+    };
+    fadeRafs.set(key, requestAnimationFrame(tick));
+  });
+}
+
+/** Fade a YouTube player 0–1 volume over ms. */
+function fadeYouTubeVolume(side, from, to, ms, key) {
+  return new Promise((resolve) => {
+    cancelFade(key);
+    const startVol = Math.min(1, Math.max(0, from));
+    const endVol = Math.min(1, Math.max(0, to));
+    const start = performance.now();
+    setYouTubeVolume(side, startVol);
+
+    const tick = (now) => {
+      const t = ms <= 0 ? 1 : Math.min(1, (now - start) / ms);
+      setYouTubeVolume(side, startVol + (endVol - startVol) * easeSmooth(t));
+      if (t < 1) {
+        fadeRafs.set(key, requestAnimationFrame(tick));
+      } else {
+        fadeRafs.delete(key);
+        setYouTubeVolume(side, endVol);
+        resolve();
+      }
+    };
+    fadeRafs.set(key, requestAnimationFrame(tick));
+  });
+}
+
+/**
+ * Detach currently playing match audio from the card, fade to silence, remove.
+ * Lets the transition screen render without a hard cut of the previous track.
+ */
+function orphanAndFadeOutMatchAudio() {
+  const jobs = [];
+  for (const side of ['a', 'b']) {
+    const el = document.getElementById(`audio-${side}`);
+    if (el && !el.paused && el.currentSrc) {
+      const from = el.volume;
+      const fadeId = `fade-match-${side}-${Date.now()}`;
+      el.id = fadeId;
+      document.body.appendChild(el);
+      jobs.push(
+        fadeHtmlVolume(el, from, 0, FADE_OUT_MS, fadeId).then(() => {
+          hardStopAudio(el);
+          try {
+            el.remove();
+          } catch {
+          }
+        })
+      );
+    }
+    // YouTube match players: fade then pause (DOM may be wiped by render after)
+    if (youtubeIsPlaying(side)) {
+      const slider = document.getElementById(`vol-${side}`);
+      const vol = slider ? Number(slider.value) / 100 : 0.25;
+      jobs.push(
+        fadeYouTubeVolume(side, vol, 0, FADE_OUT_MS, `yt-fade-match-${side}`).then(() => {
+          pauseYouTube(side);
+        })
+      );
+    }
+  }
+  return Promise.all(jobs);
+}
+
+/** Fade out transition stinger (HTML or YouTube) then stop it. */
+async function fadeOutTransitionMusic() {
+  const jobs = [];
+
+  const audio = document.getElementById('audio-transition');
+  if (audio && audio.currentSrc && !audio.paused) {
+    const from = audio.volume;
+    jobs.push(
+      fadeHtmlVolume(audio, from, 0, FADE_OUT_MS, 'html-transition-out').then(() => {
+        hardStopAudio(audio);
+        if (audio.parentNode) {
+          try {
+            audio.parentNode.removeChild(audio);
+          } catch {
+          }
+        }
+      })
+    );
+  }
+
+  if (youtubeIsPlaying('transition')) {
+    const sliderVol = DEFAULT_TRANSITION_VOLUME;
+    jobs.push(
+      fadeYouTubeVolume('transition', sliderVol, 0, FADE_OUT_MS, 'yt-transition-out').then(
+        () => {
+          pauseYouTube('transition');
+          hideYouTubeFloat('transition');
+          destroyYouTubePlayer('transition');
+        }
+      )
+    );
+  }
+
+  await Promise.all(jobs);
+}
+
 function disposeMedia({ removeTransition = false } = {}) {
   for (const side of ['a', 'b', 'champion', 'transition']) {
     const audio = document.getElementById(`audio-${side}`);
@@ -652,7 +807,7 @@ function takeNextTransitionSong() {
 
 function playAutoPreview(song, volume, gen) {
   if (!song?.id) return;
-  const vol = volumeForTrack(song.id, volume);
+  const targetVol = volumeForTrack(song.id, volume);
 
   if (isYouTubeTrack(song)) {
     const vid = youtubeVideoId(song);
@@ -661,10 +816,14 @@ function playAutoPreview(song, volume, gen) {
     if (gen !== renderGeneration) return;
     pauseAllHtmlAudioExcept(null);
     pauseAllYouTubeExcept('transition');
+    // Start silent, then fade in
     mountYouTubePlayer('transition', vid, {
-      volume01: vol,
+      volume01: 0,
       autoplay: true,
-      onPlaying: () => showYouTubeFloat('transition'),
+      onPlaying: () => {
+        showYouTubeFloat('transition');
+        fadeYouTubeVolume('transition', 0, targetVol, FADE_IN_MS, 'yt-transition-in');
+      },
     }).catch(() => {});
     return;
   }
@@ -682,11 +841,17 @@ function playAutoPreview(song, volume, gen) {
     try {
       hardStopAudio(audio);
       prepareMediaElement(audio);
-      audio.volume = vol;
+      audio.volume = 0;
       audio.src = url;
       connectMediaElement(audio);
       resumeAudioContext().then(() => {
-        audio.play().then(() => kickScopeFromPlayback()).catch(() => {});
+        audio
+          .play()
+          .then(() => {
+            kickScopeFromPlayback();
+            fadeHtmlVolume(audio, 0, targetVol, FADE_IN_MS, 'html-transition-in');
+          })
+          .catch(() => {});
       });
     } catch {
     }
@@ -695,31 +860,83 @@ function playAutoPreview(song, volume, gen) {
 
 function scheduleTransition(payload, ms) {
   clearTransitionTimer();
+  cancelFade('html-transition-in');
+  cancelFade('html-transition-out');
+  cancelFade('yt-transition-in');
+  cancelFade('yt-transition-out');
+
+  // Soften the handoff from the match into the stinger
+  orphanAndFadeOutMatchAudio();
+
   roundTransition = payload;
   const isChampionReveal = Boolean(payload.champion);
   render();
   const gen = renderGeneration;
+
   if (isChampionReveal) {
-    // Start champion bed once on reveal; results must not restart it
-    playChampionBed(
+    // Champion bed: start quiet and fade up (Spotify HTML path handles vol inside play)
+    playChampionBedFaded(
       payload.champion,
       volumeForTrack(payload.champion.id, DEFAULT_TRANSITION_VOLUME)
     );
   } else if (payload.transitionSong) {
     playAutoPreview(payload.transitionSong, DEFAULT_TRANSITION_VOLUME, gen);
   }
+
+  // Begin fade-out before the transition screen ends so the next view is quiet
+  const fadeLead = Math.min(FADE_OUT_MS, Math.max(0, ms - 80));
+  const fadeAt = Math.max(0, ms - fadeLead);
+
   transitionTimer = setTimeout(() => {
     transitionTimer = null;
     const keepChampion = Boolean(roundTransition?.champion);
-    roundTransition = null;
-    if (keepChampion) {
-      // Do not disposeMedia — that would tear down UI audio nodes only is fine via silenceMatchPlayers
-      silenceMatchPlayers({ removeTransition: true });
-    } else {
-      disposeMedia({ removeTransition: true });
+
+    fadeOutTransitionMusic().then(() => {
+      roundTransition = null;
+      if (keepChampion) {
+        // Keep champion bed; only clear match/stinger leftovers
+        silenceMatchPlayers({ removeTransition: true });
+      } else {
+        disposeMedia({ removeTransition: true });
+      }
+      render();
+    });
+  }, fadeAt);
+}
+
+/**
+ * Start champion bed, then ramp volume up so the reveal doesn't hard-cut in.
+ */
+function playChampionBedFaded(song, volume01) {
+  if (!isSongLike(song)) return Promise.resolve(null);
+
+  const target = volumeForTrack(song.id, volume01);
+
+  if (isYouTubeTrack(song)) {
+    return playChampionBed(song, target).then((p) => {
+      const side = document.getElementById('yt-champion') ? 'champion' : 'champion-bed';
+      setYouTubeVolume(side, 0);
+      fadeYouTubeVolume(side, 0, target, FADE_IN_MS, 'yt-champion-in');
+      return p;
+    });
+  }
+
+  const audio = getChampionBed();
+  const already = audio.dataset.trackId === song.id && audio.currentSrc && !audio.paused;
+  if (already) {
+    return playChampionBed(song, target);
+  }
+
+  return playChampionBed(song, target).then((el) => {
+    if (el && typeof el.volume === 'number') {
+      try {
+        el.volume = 0;
+      } catch {
+      }
+      fadeHtmlVolume(el, 0, target, FADE_IN_MS, 'html-champion-in');
     }
-    render();
-  }, ms);
+    return el;
+  });
 }
 
 function silenceMatchPlayers({ removeTransition = false } = {}) {
