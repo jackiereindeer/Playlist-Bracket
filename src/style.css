@@ -94,7 +94,11 @@ body[data-stage='final'] {
   --accent-hover: #fda4af;
 }
 
-/* Thin busy scope line behind UI — opacity kept modest */
+/* Real Web Audio scope — soft lilac, not stage green */
+:root {
+  --scope-color: #c4b5fd;
+}
+
 #scope-bg {
   position: fixed;
   inset: 0;
@@ -102,12 +106,12 @@ body[data-stage='final'] {
   height: 100%;
   z-index: 0;
   pointer-events: none;
-  opacity: 0.34;
+  opacity: 0.48;
   mix-blend-mode: screen;
 }
 
 body.on-setup #scope-bg {
-  opacity: 0.18;
+  opacity: 0.28;
 }
 
 #app {

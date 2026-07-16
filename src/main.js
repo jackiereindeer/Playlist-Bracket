@@ -6,6 +6,9 @@ import {
   progress,
 } from './tournament.js';
 import {
+  prepareMediaElement,
+  connectMediaElement,
+  resumeAudioContext,
   kickScopeFromPlayback,
   startScope,
   onMediaDisposed,
@@ -408,9 +411,8 @@ function stopChampionBed() {
 }
 
 /**
- * Plain HTML5 champion player (no Web Audio routing).
- * Starts on the reveal screen and keeps the same element into results —
- * never reassigns src for the same track (that was the pause/restart glitch).
+ * Champion bed outside #app — starts on reveal, keeps playing into results.
+ * Wired through Web Audio so the real scope can read samples.
  */
 function playChampionBed(song, volume01 = DEFAULT_TRANSITION_VOLUME) {
   if (!isSongLike(song)) return Promise.resolve(null);
@@ -421,11 +423,10 @@ function playChampionBed(song, volume01 = DEFAULT_TRANSITION_VOLUME) {
   audio.loop = true;
   audio.volume = vol;
 
-  // Already on this track — leave position alone
   if (audio.dataset.trackId === song.id && audio.currentSrc) {
     if (audio.paused) {
-      return audio
-        .play()
+      return resumeAudioContext()
+        .then(() => audio.play())
         .then(() => {
           kickScopeFromPlayback();
           return audio;
@@ -446,32 +447,32 @@ function playChampionBed(song, volume01 = DEFAULT_TRANSITION_VOLUME) {
   audio.dataset.trackId = song.id;
 
   const promise = ensurePreviewUrl(song.id)
-    .then((url) => {
+    .then(async (url) => {
       if (!url) {
         delete audio.dataset.trackId;
         return null;
       }
       if (audio.dataset.trackId !== song.id) return null;
 
-      // Same track already loaded by a concurrent call
       if (audio.dataset.trackId === song.id && audio.currentSrc) {
         audio.volume = vol;
         if (audio.paused) {
-          return audio.play().then(() => {
-            kickScopeFromPlayback();
-            return audio;
-          });
+          await resumeAudioContext();
+          await audio.play().catch(() => {});
+          kickScopeFromPlayback();
         }
         return audio;
       }
 
+      prepareMediaElement(audio);
       audio.loop = true;
       audio.volume = vol;
       audio.src = url;
-      return audio.play().then(() => {
-        kickScopeFromPlayback();
-        return audio;
-      });
+      connectMediaElement(audio);
+      await resumeAudioContext();
+      await audio.play().catch(() => {});
+      kickScopeFromPlayback();
+      return audio;
     })
     .catch(() => {
       if (audio.dataset.trackId === song.id) delete audio.dataset.trackId;
@@ -508,11 +509,13 @@ function playAutoPreview(song, volume, gen) {
     }
     try {
       hardStopAudio(audio);
+      prepareMediaElement(audio);
       audio.volume = vol;
       audio.src = url;
-      audio.play()
-        .then(() => kickScopeFromPlayback())
-        .catch(() => {});
+      connectMediaElement(audio);
+      resumeAudioContext().then(() => {
+        audio.play().then(() => kickScopeFromPlayback()).catch(() => {});
+      });
     } catch {
     }
   });
@@ -1004,8 +1007,10 @@ function wireOnePlayer(side, song, volumeKey, gen, options = {}) {
 
 function setupPreviewPlayback(side, song, volumeKey, gen, audio, playBtn, status, url, options = {}) {
   const { autoplay = false } = options;
-  // Plain HTML5 audio — no Web Audio MediaElementSource (that muted everything)
+  // crossOrigin before src → real analyser samples; graph routes to speakers
+  prepareMediaElement(audio);
   audio.src = url;
+  connectMediaElement(audio);
   playBtn.disabled = false;
   playBtn.classList.remove('no-preview');
 
@@ -1031,6 +1036,8 @@ function setupPreviewPlayback(side, song, volumeKey, gen, audio, playBtn, status
           : volumeBySide[volumeKey] ?? DEFAULT_MATCH_VOLUME
       );
       rememberTrackVolume(song.id, audio.volume);
+      connectMediaElement(audio);
+      await resumeAudioContext();
       kickScopeFromPlayback();
       await audio.play();
       if (!stillCurrent(gen, playBtn)) {
@@ -1064,8 +1071,20 @@ function setupPreviewPlayback(side, song, volumeKey, gen, audio, playBtn, status
     setPlayingUi(side, false);
   };
 
+  let corsRetryDone = false;
   audio.onerror = () => {
     if (!stillCurrent(gen, audio)) return;
+    // One retry without CORS so sound still works if CDN blocks anonymous
+    if (!corsRetryDone && audio.crossOrigin) {
+      corsRetryDone = true;
+      try {
+        audio.removeAttribute('crossorigin');
+        audio.src = url;
+        connectMediaElement(audio);
+        return;
+      } catch {
+      }
+    }
     setPlayingUi(side, false);
     if (stillCurrent(gen, status) && status) {
       status.hidden = false;
