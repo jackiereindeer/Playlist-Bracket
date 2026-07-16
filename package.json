@@ -1,0 +1,26 @@
+{
+  "name": "playlist-bracket",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n server,web -c green,cyan \"node server/index.js\" \"vite\"",
+    "dev:server": "node server/index.js",
+    "dev:web": "vite",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "preview": "vite preview"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "vite": "^8.1.1"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
