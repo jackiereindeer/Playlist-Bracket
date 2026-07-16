@@ -1715,6 +1715,48 @@ body.on-setup {
   text-transform: uppercase;
 }
 
+/* Single-round tab: roomier match cards */
+.round-list-single {
+  max-width: 640px;
+  max-height: min(72vh, 760px);
+}
+
+.round-list-heading-solo {
+  justify-content: center;
+  gap: 0.65rem;
+  font-size: 1.05rem;
+  margin-bottom: 0.85rem;
+}
+
+.round-list-match-lg {
+  padding: 0.75rem 0.85rem;
+  gap: 0.55rem;
+}
+
+.round-list-match-lg .round-list-side .mm-cover {
+  width: 52px;
+  height: 52px;
+}
+
+.round-list-match-lg .round-list-side .mm-cover-inner,
+.round-list-match-lg .round-list-side .mm-cover img {
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
+}
+
+.round-list-match-lg .round-list-text strong {
+  font-size: 0.9rem;
+}
+
+.round-list-match-lg .round-list-text span {
+  font-size: 0.75rem;
+}
+
+.round-list-match-lg .round-list-vs {
+  font-size: 0.72rem;
+}
+
 .mm-bracket-scroll {
   overflow-x: scroll;
   overflow-y: auto;
