@@ -2765,6 +2765,70 @@ body[data-stage='quarters'] .vs-badge {
   max-width: 12rem;
 }
 
+.party-setting-check {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.35rem 0.65rem;
+  align-items: start;
+  padding: 0.65rem 0.75rem;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--border);
+  background: var(--bg);
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 0.15rem 0 0;
+}
+
+.party-setting-check input {
+  margin-top: 0.15rem;
+}
+
+.party-setting-check > span:first-of-type {
+  grid-column: 2;
+}
+
+.party-setting-hint {
+  grid-column: 2;
+  font-size: 0.78rem;
+  font-weight: 450;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.party-roster {
+  margin-top: 0.85rem;
+}
+
+.party-roster-list {
+  max-height: min(36vh, 340px);
+}
+
+/* Party YouTube float (mixed Spotify/YT brackets) */
+.party-yt-float {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  opacity: 0.01;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 0;
+  bottom: 0;
+  right: 0;
+}
+
+.roster-row.is-readonly {
+  cursor: default;
+}
+
+.roster-row.is-readonly:hover {
+  background: transparent;
+}
+
+.roster-added {
+  font-weight: 500;
+}
+
 .party-mod {
   margin-top: 1rem;
   padding-top: 0.75rem;

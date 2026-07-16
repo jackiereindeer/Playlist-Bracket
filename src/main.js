@@ -1408,7 +1408,7 @@ function renderSetupLoad() {
           ${
             error
               ? `<div class="error-box" role="alert">${escapeHtml(error)}</div>`
-              : `<p class="setup-note">Load a public playlist — then pick which songs enter the bracket, or add more songs by link.</p>`
+              : `<p class="setup-note">Load a Spotify or YouTube playlist, then add more songs or playlists from either service.</p>`
           }
 
           <div class="form-actions">
@@ -1494,19 +1494,18 @@ function renderSetupRoster() {
         <div class="roster-toolbar">
           <button type="button" class="ghost small-btn" id="roster-all" ${busy ? 'disabled' : ''}>Select all</button>
           <button type="button" class="ghost small-btn" id="roster-none" ${busy ? 'disabled' : ''}>Select none</button>
-          <button type="button" class="ghost small-btn" id="roster-invert" ${busy ? 'disabled' : ''}>Invert</button>
           <button type="button" class="ghost small-btn" id="roster-reload" ${busy ? 'disabled' : ''}>Different playlist</button>
         </div>
 
         <div class="roster-list" id="roster-list" role="list">${rows}</div>
 
         <div class="field roster-add-field">
-          <label for="add-song-url">Add a song by link</label>
+          <label for="add-song-url">Add songs or playlist by link</label>
           <div class="roster-add-row">
             <input
               id="add-song-url"
               type="url"
-              placeholder="Paste Spotify song link…"
+              placeholder="Spotify / YouTube song or playlist…"
               autocomplete="off"
               value="${escapeHtml(draft.addUrl || '')}"
               ${busy ? 'disabled' : ''}
@@ -1515,7 +1514,6 @@ function renderSetupRoster() {
               ${draft.busy === 'add' ? 'Adding…' : 'Add'}
             </button>
           </div>
-          <p class="setup-note">Uncheck a song to leave it out of the tournament.</p>
         </div>
 
         <div class="field">
@@ -1602,14 +1600,6 @@ function wireSetupRoster() {
   document.getElementById('roster-none')?.addEventListener('click', () => {
     if (!setupDraft) return;
     setupDraft.selected.clear();
-    render();
-  });
-  document.getElementById('roster-invert')?.addEventListener('click', () => {
-    if (!setupDraft) return;
-    for (const s of setupDraft.tracks) {
-      if (setupDraft.selected.has(s.id)) setupDraft.selected.delete(s.id);
-      else setupDraft.selected.add(s.id);
-    }
     render();
   });
   document.getElementById('roster-reload')?.addEventListener('click', () => {
@@ -1708,7 +1698,7 @@ async function onLoadPlaylist(e) {
       note:
         unique.length === 1
           ? 'One song loaded — add more with links below, or load a playlist.'
-          : `Loaded ${unique.length} songs. Uncheck any you want out.`,
+          : `Loaded ${unique.length} songs.`,
     };
     error = '';
   } catch (err) {
@@ -1722,13 +1712,40 @@ async function onLoadPlaylist(e) {
   }
 }
 
+function songFromImport(data) {
+  if (!isSongLike(data)) return null;
+  return {
+    id: data.id,
+    name: data.name,
+    artists: data.artists || '',
+    image: data.image || null,
+    source: data.source || 'spotify',
+    spotifyUrl: data.spotifyUrl || null,
+    youtubeUrl: data.youtubeUrl || null,
+    youtubeId: data.youtubeId || null,
+    embedUrl: data.embedUrl || null,
+  };
+}
+
+function refreshDraftSourceLabel() {
+  if (!setupDraft?.tracks?.length) return;
+  const sources = new Set(setupDraft.tracks.map((t) => t.source || 'spotify'));
+  const mixed = sources.size > 1;
+  if (setupDraft.meta) {
+    setupDraft.meta.source = mixed ? 'mixed' : [...sources][0];
+    if (mixed && setupDraft.meta.name && !/mix|custom/i.test(setupDraft.meta.name)) {
+      // Keep original name; source flag is enough
+    }
+  }
+}
+
 async function onAddSongToDraft() {
   if (!setupDraft || setupDraft.busy) return;
   error = '';
   const input = document.getElementById('add-song-url');
   const url = (input?.value || setupDraft.addUrl || '').trim();
   if (!url) {
-    error = 'Paste a Spotify song link to add.';
+    error = 'Paste a Spotify or YouTube song or playlist link.';
     render();
     return;
   }
@@ -1739,39 +1756,58 @@ async function onAddSongToDraft() {
   render();
 
   try {
-    const res = await fetch(`/api/track?url=${encodeURIComponent(url)}`);
+    const res = await fetch(`/api/import?url=${encodeURIComponent(url)}`);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      throw new Error(data.error || `Could not add song (${res.status})`);
+      throw new Error(data.error || `Could not add (${res.status})`);
     }
-    if (!isSongLike(data)) {
-      throw new Error('That link did not return a playable song.');
+    const incoming = (Array.isArray(data.tracks) ? data.tracks : [])
+      .map(songFromImport)
+      .filter(Boolean);
+    if (!incoming.length) {
+      throw new Error('That link did not return any playable songs.');
     }
-    if (setupDraft.tracks.some((t) => t.id === data.id)) {
-      setupDraft.selected.add(data.id);
-      setupDraft.note = `"${data.name}" is already in the list (kept selected).`;
-      setupDraft.addUrl = '';
-      return;
+
+    let added = 0;
+    let reselected = 0;
+    for (const song of incoming) {
+      const existing = setupDraft.tracks.find((t) => t.id === song.id);
+      if (existing) {
+        if (!setupDraft.selected.has(song.id)) {
+          setupDraft.selected.add(song.id);
+          reselected += 1;
+        }
+        continue;
+      }
+      setupDraft.tracks.push(song);
+      setupDraft.selected.add(song.id);
+      added += 1;
     }
-    setupDraft.tracks.push({
-      id: data.id,
-      name: data.name,
-      artists: data.artists || '',
-      image: data.image || null,
-      source: data.source || 'spotify',
-      spotifyUrl: data.spotifyUrl || null,
-      embedUrl: data.embedUrl || null,
-    });
-    setupDraft.selected.add(data.id);
+
+    refreshDraftSourceLabel();
     setupDraft.addUrl = '';
-    setupDraft.note = `Added “${data.name}”.`;
-    // Scroll list to bottom after paint
+    if (data.kind === 'playlist') {
+      setupDraft.note =
+        added > 0
+          ? `Added ${added} from “${data.name || 'playlist'}”${
+              reselected ? ` · ${reselected} already listed` : ''
+            }.`
+          : reselected
+            ? `Those songs were already in the list (${reselected} selected).`
+            : 'Nothing new to add from that playlist.';
+    } else {
+      const one = incoming[0];
+      setupDraft.note =
+        added > 0
+          ? `Added “${one.name}”.`
+          : `"${one.name}" is already in the list (kept selected).`;
+    }
     requestAnimationFrame(() => {
       const list = document.getElementById('roster-list');
       if (list) list.scrollTop = list.scrollHeight;
     });
   } catch (err) {
-    error = err.message || 'Could not add that song.';
+    error = err.message || 'Could not add that link.';
   } finally {
     if (setupDraft) setupDraft.busy = '';
     render();

@@ -44,6 +44,128 @@ function isYouTubePlaylistUrl(input) {
   return Boolean(extractYouTubePlaylistId(input));
 }
 
+/**
+ * Extract a single video id from watch / youtu.be / shorts / embed / music links.
+ * Prefer v= over list= so "video in playlist" links still resolve as a song.
+ */
+function extractYouTubeVideoId(input) {
+  if (!input || typeof input !== 'string') return null;
+  const trimmed = input.trim();
+
+  // Bare 11-char video id (common YouTube form)
+  if (/^[A-Za-z0-9_-]{11}$/.test(trimmed)) return trimmed;
+
+  try {
+    const url = new URL(trimmed);
+    const host = url.hostname.replace(/^www\./, '');
+    if (
+      host === 'youtu.be' ||
+      host === 'youtube.com' ||
+      host === 'm.youtube.com' ||
+      host === 'music.youtube.com' ||
+      host === 'www.youtube.com'
+    ) {
+      if (host === 'youtu.be') {
+        const id = url.pathname.split('/').filter(Boolean)[0];
+        if (id && /^[A-Za-z0-9_-]{11}$/.test(id)) return id;
+      }
+      const v = url.searchParams.get('v');
+      if (v && /^[A-Za-z0-9_-]{11}$/.test(v)) return v;
+
+      const parts = url.pathname.split('/').filter(Boolean);
+      // /embed/ID, /shorts/ID, /live/ID, /v/ID
+      const kindIdx = parts.findIndex((p) =>
+        ['embed', 'shorts', 'live', 'v'].includes(p)
+      );
+      if (kindIdx !== -1 && parts[kindIdx + 1]) {
+        const id = parts[kindIdx + 1].split('?')[0];
+        if (/^[A-Za-z0-9_-]{11}$/.test(id)) return id;
+      }
+    }
+  } catch {
+  }
+
+  const loose = trimmed.match(
+    /(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/|live\/|v\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/
+  );
+  return loose?.[1] || null;
+}
+
+function isYouTubeVideoUrl(input) {
+  return Boolean(extractYouTubeVideoId(input));
+}
+
+function trackFromVideoResource(item) {
+  const sn = item?.snippet;
+  const vid = item?.id;
+  if (!vid || typeof vid !== 'string') return null;
+
+  const title = (sn?.title || '').trim();
+  if (!title || /^private video$/i.test(title) || /^deleted video$/i.test(title)) {
+    return null;
+  }
+
+  const thumbs = sn?.thumbnails || {};
+  const image =
+    thumbs.medium?.url ||
+    thumbs.high?.url ||
+    thumbs.default?.url ||
+    `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`;
+
+  const channel = (sn?.channelTitle || '').trim();
+
+  return {
+    id: vid,
+    name: title,
+    artists: channel || 'YouTube',
+    image,
+    youtubeId: vid,
+    source: 'youtube',
+    spotifyUrl: null,
+    youtubeUrl: `https://www.youtube.com/watch?v=${vid}`,
+    embedUrl: `https://www.youtube.com/embed/${vid}?enablejsapi=1&rel=0&modestbranding=1`,
+  };
+}
+
+/** Single public video metadata (solo “add song” by YouTube link). */
+async function fetchYouTubeVideo(videoId) {
+  const id = String(videoId || '').trim();
+  if (!id || !/^[A-Za-z0-9_-]{11}$/.test(id)) {
+    const err = new Error('Invalid YouTube video id.');
+    err.status = 400;
+    throw err;
+  }
+
+  const body = await ytGet('videos', {
+    part: 'snippet,status',
+    id,
+    maxResults: '1',
+  });
+  const item = body?.items?.[0];
+  if (!item) {
+    const err = new Error(
+      'YouTube video not found. Check the link and that the video is public.'
+    );
+    err.status = 404;
+    throw err;
+  }
+
+  const privacy = item?.status?.privacyStatus;
+  if (privacy === 'private') {
+    const err = new Error('That YouTube video is private.');
+    err.status = 403;
+    throw err;
+  }
+
+  const track = trackFromVideoResource(item);
+  if (!track) {
+    const err = new Error('Could not read that YouTube video.');
+    err.status = 404;
+    throw err;
+  }
+  return track;
+}
+
 async function ytGet(path, params) {
   const key = getApiKey();
   if (!key) {
@@ -175,9 +297,10 @@ async function fetchYouTubePlaylist(playlistId) {
     if (!pageToken) break;
   }
 
-  if (tracks.length < 2) {
+  // Allow 1+ so solo can load a short list and add more videos by link
+  if (tracks.length < 1) {
     const err = new Error(
-      'Need at least 2 playable videos in the YouTube playlist to run a tournament.'
+      'No playable videos found in that YouTube playlist.'
     );
     err.status = 400;
     throw err;
@@ -200,6 +323,9 @@ async function fetchYouTubePlaylist(playlistId) {
 export {
   getApiKey,
   extractYouTubePlaylistId,
+  extractYouTubeVideoId,
   isYouTubePlaylistUrl,
+  isYouTubeVideoUrl,
   fetchYouTubePlaylist,
+  fetchYouTubeVideo,
 };

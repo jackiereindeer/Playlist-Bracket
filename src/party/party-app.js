@@ -14,6 +14,15 @@ import {
   prefetchMatchPreviews,
   prefetchSongPreview,
 } from '../preview-cache.js';
+import {
+  isYouTubeTrack,
+  youtubeVideoId,
+  loadYouTubeApi,
+  mountYouTubePlayer,
+  destroyYouTubePlayer,
+  setYouTubeVolume,
+  pauseYouTube,
+} from '../youtube-players.js';
 import { buildPartyBracketHtml, wirePartyBracketTabs } from './party-bracket.js';
 
 /**
@@ -322,6 +331,8 @@ export function startPartyApp(root, opts) {
     pfp: loadSavedPfp(),
     code: urlRoom || '',
     playlistUrl: '',
+    /** Local draft for “add song” input (not persisted) */
+    addSongUrl: '',
   };
   // Link with ?room= → join tab (not host); never auto-join without a fresh name
   if (urlRoom.length === 6) {
@@ -363,10 +374,38 @@ export function startPartyApp(root, opts) {
     }
   }
 
+  function stopPartyYouTube() {
+    for (const side of ['party-a', 'party-b', 'party-win', 'party-champ']) {
+      try {
+        pauseYouTube(side);
+        destroyYouTubePlayer(side);
+      } catch {
+      }
+      try {
+        document.getElementById(`yt-${side}`)?.remove();
+      } catch {
+      }
+    }
+  }
+
+  function ensurePartyYtHost(sideKey) {
+    const id = `yt-${sideKey}`;
+    let el = document.getElementById(id);
+    if (!el) {
+      el = document.createElement('div');
+      el.id = id;
+      el.className = 'party-yt-float';
+      el.setAttribute('aria-hidden', 'true');
+      document.body.appendChild(el);
+    }
+    return el;
+  }
+
   function hardStopAudio() {
     stopEq();
     playInflight.clear();
     playGen += 1; // abandon in-flight playPreview
+    stopPartyYouTube();
     if (!audioEl) {
       playSide = null;
       lastSyncedKey = null;
@@ -387,6 +426,7 @@ export function startPartyApp(root, opts) {
 
   function disposePartyAudio() {
     hardStopAudio();
+    stopPartyYouTube();
     if (!audioEl) return;
     try {
       disconnectMediaElement(audioEl);
@@ -397,6 +437,13 @@ export function startPartyApp(root, opts) {
     } catch {
     }
     audioEl = null;
+  }
+
+  function ytSideKey(side) {
+    if (side === 'a' || side === 'b') return `party-${side}`;
+    if (side === 'winner' || side === 'win') return 'party-win';
+    if (side === 'champion') return 'party-champ';
+    return `party-${side || 'a'}`;
   }
 
   function ensureAudio() {
@@ -428,6 +475,9 @@ export function startPartyApp(root, opts) {
         audioEl.volume = localVolume;
       } catch {
       }
+    }
+    for (const side of ['party-a', 'party-b', 'party-win', 'party-champ']) {
+      setYouTubeVolume(side, localVolume);
     }
     root.querySelectorAll('[data-party-vol-label]').forEach((el) => {
       el.textContent = `${Math.round(localVolume * 100)}%`;
@@ -495,6 +545,72 @@ export function startPartyApp(root, opts) {
   async function playPreview(song, side, { quiet = false, continuous = false } = {}) {
     if (destroyed || !song?.id) return;
 
+    // YouTube tracks (mixed brackets)
+    if (isYouTubeTrack(song)) {
+      const vid = youtubeVideoId(song);
+      if (!vid) {
+        if (!quiet) statusLine = 'Could not play YouTube video.';
+        return;
+      }
+      const yKey = ytSideKey(side);
+      if (
+        continuous &&
+        playSide === side &&
+        audioEl?.dataset?.trackId === song.id
+      ) {
+        // keep going
+        return;
+      }
+      playInflight.add(song.id);
+      const myPlay = ++playGen;
+      try {
+        // Stop HTML audio so it doesn't stack with YT
+        if (audioEl) {
+          try {
+            audioEl.pause();
+            audioEl.removeAttribute('src');
+            audioEl.load();
+          } catch {
+          }
+        }
+        stopPartyYouTube();
+        ensurePartyYtHost(yKey);
+        await loadYouTubeApi();
+        if (destroyed || myPlay !== playGen) {
+          playInflight.delete(song.id);
+          return;
+        }
+        await mountYouTubePlayer(yKey, vid, {
+          volume01: localVolume,
+          autoplay: true,
+          onPlaying: () => kickScopeFromPlayback(),
+        });
+        setYouTubeVolume(yKey, localVolume);
+        playSide = side;
+        if (audioEl) {
+          try {
+            audioEl.dataset.trackId = song.id;
+          } catch {
+          }
+        }
+        statusLine = '';
+        playInflight.delete(song.id);
+        startEq(side);
+        if (!quiet && side !== 'winner' && side !== 'champion' && side !== 'win') {
+          root.querySelectorAll('.cover-play-btn').forEach((btn) => {
+            const s = btn.getAttribute('data-play');
+            btn.classList.toggle('is-playing', s === side);
+            const icon = btn.querySelector('.cover-play-icon');
+            if (icon) icon.textContent = s === side ? '❚❚' : '▶';
+          });
+        }
+      } catch {
+        playInflight.delete(song.id);
+        if (!quiet) statusLine = 'Could not play YouTube video.';
+      }
+      return;
+    }
+
     if (continuous && audioEl?.src && !audioEl.paused && audioEl.dataset.trackId === song.id) {
       playSide = side;
       audioEl.volume = localVolume;
@@ -515,6 +631,7 @@ export function startPartyApp(root, opts) {
     const myPlay = ++playGen;
 
     try {
+      stopPartyYouTube();
       const previewUrl = await ensurePreviewUrl(song.id);
       if (destroyed || myPlay !== playGen) {
         playInflight.delete(song.id);
@@ -1652,6 +1769,50 @@ export function startPartyApp(root, opts) {
 
   function renderLobby(s, isHost) {
     const pl = s.playlist;
+    const roster = s.roster;
+    const selected = roster?.selected ?? pl?.selectedCount ?? 0;
+    const total = roster?.total ?? pl?.trackCount ?? 0;
+    const allowPartyAdd = Boolean(s.settings?.allowPartyAddSongs);
+    const canAddSongs = isHost || allowPartyAdd;
+    const hasRoster = Boolean(roster?.tracks?.length);
+
+    const rosterRows = hasRoster
+      ? roster.tracks
+          .map((song) => {
+            const on = Boolean(song.included);
+            const art = song.image
+              ? `<img class="roster-row-art" src="${esc(song.image)}" alt="" loading="lazy" />`
+              : `<span class="roster-row-art roster-row-art-fallback" aria-hidden="true">♪</span>`;
+            const added =
+              song.addedByName
+                ? `<span class="roster-added muted small">+ ${esc(song.addedByName)}</span>`
+                : '';
+            // Only host can change inclusion; everyone sees status
+            const check = isHost
+              ? `<input type="checkbox" class="roster-check" data-roster-id="${esc(song.id)}" ${
+                  on ? 'checked' : ''
+                } />`
+              : `<input type="checkbox" class="roster-check" ${on ? 'checked' : ''} disabled tabindex="-1" />`;
+            return `
+              <label class="roster-row ${on ? 'is-on' : 'is-off'} ${
+                isHost ? 'is-host-edit' : 'is-readonly'
+              }" ${isHost ? '' : 'title="Only the host can include/exclude songs"'}>
+                ${check}
+                <span class="roster-check-ui" aria-hidden="true"></span>
+                ${art}
+                <span class="roster-row-text">
+                  <span class="roster-row-name">${esc(song.name || 'Unknown')}</span>
+                  <span class="roster-row-artists">${esc(song.artists || '')}${
+                    added ? ` · ${added}` : ''
+                  }</span>
+                </span>
+                <span class="roster-row-idx muted small">${song.index || ''}</span>
+              </label>
+            `;
+          })
+          .join('')
+      : '';
+
     return `
       <div class="card party-lobby">
         <h2>Lobby</h2>
@@ -1672,29 +1833,113 @@ export function startPartyApp(root, opts) {
                 <option value="sync" ${s.settings?.playMode === 'sync' ? 'selected' : ''}>Sync (host plays for everyone)</option>
               </select>
             </label>
+            <label class="party-setting-check">
+              <input type="checkbox" id="p-allow-add" ${allowPartyAdd ? 'checked' : ''} />
+              <span>Allow party adding songs</span>
+              <span class="party-setting-hint">If on, anyone can add single song links. Only you can add whole playlists or uncheck songs.</span>
+            </label>
           </div>
           <div class="field">
-            <label for="p-url">Spotify playlist link</label>
-            <input id="p-url" type="url" placeholder="https://open.spotify.com/playlist/…" value="${esc(form.playlistUrl || s.playlistUrl || '')}" />
+            <label for="p-url">Playlist or song link (Spotify / YouTube)</label>
+            <input id="p-url" type="url" placeholder="Spotify or YouTube playlist / song…" value="${esc(
+              form.playlistUrl || s.playlistUrl || ''
+            )}" />
           </div>
           <div class="form-actions">
-            <button type="button" id="p-load">Load playlist</button>
-            <button type="button" id="p-start" ${pl ? '' : 'disabled'}>Start tournament</button>
+            <button type="button" id="p-load">Load songs</button>
+            <button type="button" id="p-start" ${
+              selected >= 2 ? '' : 'disabled'
+            }>Start tournament (${selected})</button>
           </div>
         `
-            : `<p class="muted">Waiting for host to load a playlist and start…</p>`
+            : hasRoster
+              ? `<p class="muted small">Host is curating the bracket. ${
+                  allowPartyAdd
+                    ? 'You can add single songs below (playlists are host-only).'
+                    : 'Only the host can add or remove songs.'
+                }</p>`
+              : `<p class="muted">Waiting for host to load a playlist and start…</p>`
         }
+
         ${
-          pl
-            ? `<div class="party-playlist-preview">
-                ${pl.image ? `<img src="${esc(pl.image)}" alt="" width="72" height="72" />` : ''}
-                <div>
-                  <strong>${esc(pl.name)}</strong>
-                  <p class="small muted">${pl.trackCount || '?'} songs · everyone in the lobby is ready when host starts</p>
-                </div>
-              </div>`
+          pl || hasRoster
+            ? `
+          <div class="party-playlist-preview">
+            ${
+              pl?.image
+                ? `<img src="${esc(pl.image)}" alt="" width="72" height="72" />`
+                : ''
+            }
+            <div>
+              <strong>${esc(pl?.name || 'Party mix')}</strong>
+              <p class="small muted">
+                <strong>${selected}</strong> of ${total} in the bracket
+                ${
+                  allowPartyAdd
+                    ? ' · party can add songs'
+                    : isHost
+                      ? ' · only host adds songs'
+                      : ''
+                }
+              </p>
+            </div>
+          </div>
+        `
             : ''
         }
+
+        ${
+          hasRoster
+            ? `
+          <div class="party-roster">
+            ${
+              isHost
+                ? `<div class="roster-toolbar">
+                    <button type="button" class="ghost small-btn" data-roster-bulk="all">Select all</button>
+                    <button type="button" class="ghost small-btn" data-roster-bulk="none">Select none</button>
+                  </div>`
+                : `<p class="setup-note">Included songs are checked. Only the host can change that.</p>`
+            }
+            <div class="roster-list party-roster-list" id="party-roster-list" role="list">
+              ${rosterRows}
+            </div>
+            ${
+              canAddSongs
+                ? `
+              <div class="field roster-add-field">
+                <label for="p-add-song">${
+                  isHost
+                    ? 'Add song or playlist by link'
+                    : 'Add a single song by link'
+                }</label>
+                <div class="roster-add-row">
+                  <input
+                    id="p-add-song"
+                    type="url"
+                    placeholder="${
+                      isHost
+                        ? 'Spotify / YouTube song or playlist…'
+                        : 'Spotify or YouTube song link…'
+                    }"
+                    autocomplete="off"
+                    value="${esc(form.addSongUrl || '')}"
+                  />
+                  <button type="button" id="p-add-song-btn">Add</button>
+                </div>
+                ${
+                  isHost
+                    ? `<p class="setup-note">Playlists and single songs both work. Mix Spotify + YouTube.</p>`
+                    : `<p class="setup-note">Single songs only — playlists are host-only. Host decides what’s in the bracket.</p>`
+                }
+              </div>
+            `
+                : ''
+            }
+          </div>
+        `
+            : ''
+        }
+
         ${isHost ? hostModeration(s) : ''}
       </div>
     `;
@@ -1922,35 +2167,92 @@ export function startPartyApp(root, opts) {
       }
     }
 
-    if (isHost && s.phase === 'lobby') {
-      // Prefer remembered play mode
-      try {
-        const pref = localStorage.getItem(PLAYMODE_PREF_KEY);
-        if (pref === 'sync' || pref === 'desync') {
-          if (s.settings?.playMode !== pref) {
-            send('settings', { settings: { playMode: pref } });
-          }
-        }
-      } catch {
-      }
-      root.querySelector('#p-seed')?.addEventListener('change', (e) => {
-        send('settings', { settings: { seeding: e.target.value } });
-      });
-      root.querySelector('#p-playmode')?.addEventListener('change', (e) => {
-        const mode = e.target.value;
+    if (s.phase === 'lobby') {
+      if (isHost) {
+        // Prefer remembered play mode
         try {
-          localStorage.setItem(PLAYMODE_PREF_KEY, mode);
+          const pref = localStorage.getItem(PLAYMODE_PREF_KEY);
+          if (pref === 'sync' || pref === 'desync') {
+            if (s.settings?.playMode !== pref) {
+              send('settings', { settings: { playMode: pref } });
+            }
+          }
         } catch {
         }
-        send('settings', { settings: { playMode: mode } });
+        root.querySelector('#p-seed')?.addEventListener('change', (e) => {
+          send('settings', { settings: { seeding: e.target.value } });
+        });
+        root.querySelector('#p-playmode')?.addEventListener('change', (e) => {
+          const mode = e.target.value;
+          try {
+            localStorage.setItem(PLAYMODE_PREF_KEY, mode);
+          } catch {
+          }
+          send('settings', { settings: { playMode: mode } });
+        });
+        root.querySelector('#p-allow-add')?.addEventListener('change', (e) => {
+          send('settings', {
+            settings: { allowPartyAddSongs: Boolean(e.target.checked) },
+          });
+        });
+        root.querySelector('#p-load')?.addEventListener('click', () => {
+          const url = root.querySelector('#p-url')?.value?.trim() || '';
+          form.playlistUrl = url;
+          statusLine = 'Loading songs…';
+          send('load_playlist', { url });
+        });
+        root.querySelector('#p-start')?.addEventListener('click', () => send('start'));
+
+        // Host: toggle inclusion (including songs others added)
+        root.querySelector('#party-roster-list')?.addEventListener('change', (e) => {
+          const t = e.target;
+          if (!(t instanceof HTMLInputElement) || !t.classList.contains('roster-check')) {
+            return;
+          }
+          const id = t.getAttribute('data-roster-id');
+          if (!id) return;
+          const row = t.closest('.roster-row');
+          if (row) {
+            row.classList.toggle('is-on', t.checked);
+            row.classList.toggle('is-off', !t.checked);
+          }
+          send('roster_include', { trackId: id, included: t.checked });
+        });
+        root.querySelectorAll('[data-roster-bulk]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            send('roster_bulk', { mode: btn.getAttribute('data-roster-bulk') });
+          });
+        });
+      }
+
+      // Host always; guests only when allowPartyAddSongs
+      const addInput = root.querySelector('#p-add-song');
+      addInput?.addEventListener('input', () => {
+        form.addSongUrl = addInput.value;
       });
-      root.querySelector('#p-load')?.addEventListener('click', () => {
-        const url = root.querySelector('#p-url')?.value?.trim() || '';
-        form.playlistUrl = url;
-        statusLine = 'Loading playlist…';
-        send('load_playlist', { url });
+      const doAddSong = () => {
+        const url = (addInput?.value || form.addSongUrl || '').trim();
+        if (!url) {
+          statusLine = isHost
+            ? 'Paste a song or playlist link first.'
+            : 'Paste a single song link first.';
+          const st = root.querySelector('.party-status');
+          if (st) st.textContent = statusLine;
+          return;
+        }
+        form.addSongUrl = url;
+        statusLine = 'Adding…';
+        send('add_media', { url });
+        form.addSongUrl = '';
+        if (addInput) addInput.value = '';
+      };
+      root.querySelector('#p-add-song-btn')?.addEventListener('click', doAddSong);
+      addInput?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          doAddSong();
+        }
       });
-      root.querySelector('#p-start')?.addEventListener('click', () => send('start'));
     }
 
     root.querySelectorAll('[data-kick]').forEach((btn) => {

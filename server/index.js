@@ -12,10 +12,13 @@ import {
 } from './spotify-public.js';
 import {
   extractYouTubePlaylistId,
+  extractYouTubeVideoId,
   isYouTubePlaylistUrl,
   fetchYouTubePlaylist,
+  fetchYouTubeVideo,
   getApiKey as getYouTubeApiKey,
 } from './youtube-public.js';
+import { resolveMediaUrl } from './resolve-media.js';
 import { attachPartyHub } from './party/hub.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -42,6 +45,28 @@ app.get('/api/health', (_req, res) => {
 app.get('/api/playlist', async (req, res) => {
   try {
     const raw = String(req.query.url || req.query.id || '').slice(0, 500);
+
+    // Explicit single YouTube video (watch / youtu.be / shorts) → one-song list.
+    // Prefer video when a link has both v= and list=.
+    const ytVideoId = extractYouTubeVideoId(raw);
+    const hasYtVideoPath =
+      Boolean(ytVideoId) &&
+      /([?&]v=|youtu\.be\/|\/shorts\/|\/embed\/|\/live\/)/i.test(raw);
+    if (hasYtVideoPath) {
+      const track = await fetchYouTubeVideo(ytVideoId);
+      const playlist = {
+        id: track.id,
+        name: track.name || 'YouTube video',
+        description: '',
+        image: track.image || null,
+        owner: track.artists || '',
+        source: 'youtube',
+        youtubeUrl: track.youtubeUrl,
+        tracks: [track],
+      };
+      res.set('Cache-Control', 'private, max-age=60');
+      return res.json(playlist);
+    }
 
     // YouTube playlist (list=… / PL…)
     if (isYouTubePlaylistUrl(raw)) {
@@ -116,24 +141,54 @@ app.get('/api/playlist', async (req, res) => {
   }
 });
 
-/** Single Spotify track metadata (solo “add song” by link). */
+/**
+ * Single track metadata (solo “add song” by link).
+ * Spotify track URL or YouTube video URL.
+ * For playlists, prefer /api/import (returns many tracks).
+ */
 app.get('/api/track', async (req, res) => {
   try {
     const raw = String(req.query.url || req.query.id || '').slice(0, 500);
-    const trackId = extractTrackId(raw);
-    if (!trackId) {
+    const resolved = await resolveMediaUrl(raw);
+    if (resolved.kind === 'playlist') {
+      // Back-compat: clients that only expect one track get a clear error
+      // unless they opt in via /api/import
       return res.status(400).json({
-        error: 'Paste a Spotify song link (open.spotify.com/track/… sp…).',
+        error:
+          'That looks like a playlist. Use Add with a playlist link (import) or paste a single song/video URL.',
+        code: 'IS_PLAYLIST',
+        trackCount: resolved.tracks?.length || 0,
       });
     }
-    const track = await fetchPublicTrack(trackId);
-    track.source = track.source || 'spotify';
+    const track = resolved.tracks[0];
+    if (!track) {
+      return res.status(404).json({ error: 'No song found.' });
+    }
     res.set('Cache-Control', 'private, max-age=120');
     res.json(track);
   } catch (err) {
     console.error('[api/track]', err.message, err.code || '');
     res.status(err.status || 500).json({
       error: err.message || 'Could not load that song.',
+      code: err.code || undefined,
+    });
+  }
+});
+
+/**
+ * Import one song or a whole playlist (Spotify + YouTube).
+ * Response: { kind, name, source, tracks: Song[] }
+ */
+app.get('/api/import', async (req, res) => {
+  try {
+    const raw = String(req.query.url || req.query.id || '').slice(0, 500);
+    const resolved = await resolveMediaUrl(raw);
+    res.set('Cache-Control', 'private, max-age=60');
+    res.json(resolved);
+  } catch (err) {
+    console.error('[api/import]', err.message, err.code || '');
+    res.status(err.status || 500).json({
+      error: err.message || 'Could not import that link.',
       code: err.code || undefined,
     });
   }

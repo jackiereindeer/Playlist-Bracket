@@ -5,11 +5,7 @@ import { WebSocketServer } from 'ws';
 import crypto from 'crypto';
 import { Room } from './room.js';
 import { CODE_ALPHABET, CODE_LENGTH, COLORS, AVATARS } from './constants.js';
-import {
-  extractPlaylistId,
-  fetchPublicPlaylist,
-} from '../spotify-public.js';
-import { isYouTubePlaylistUrl } from '../youtube-public.js';
+import { resolveMediaUrl } from '../resolve-media.js';
 
 function genCode() {
   let s = '';
@@ -125,9 +121,7 @@ async function handle(ws, ctx, msg, type, rooms, hub) {
     player.ws = ws;
     ctx.room = room;
     ctx.playerId = player.id;
-    send(ws, 'joined', {
-      state: room.snapshot(player.id),
-    });
+    send(ws, 'joined', { state: room.snapshot(player.id) });
     return;
   }
 
@@ -171,26 +165,43 @@ async function handle(ws, ctx, msg, type, rooms, hub) {
       room.updateSettings(pid, msg.settings || msg);
       break;
     case 'load_playlist': {
+      // Host replaces the roster with this link (playlist or single song)
       room.assertHost(pid);
       const url = String(msg.url || '').slice(0, 500);
-      if (isYouTubePlaylistUrl(url)) {
-        const err = new Error(
-          'Party mode is Spotify-only for now. Use a public Spotify playlist.'
-        );
-        err.code = 'SPOTIFY_ONLY';
-        throw err;
-      }
-      const id = extractPlaylistId(url);
-      if (!id) {
-        const err = new Error('Invalid Spotify playlist link.');
-        err.code = 'BAD_URL';
-        throw err;
-      }
       send(ws, 'loading', { what: 'playlist' });
-      const playlist = await fetchPublicPlaylist(id);
-      room.setPlaylist(pid, playlist, url);
+      const resolved = await resolveMediaUrl(url);
+      room.setPlaylist(
+        pid,
+        {
+          id: resolved.id || resolved.tracks[0]?.id || 'custom',
+          name: resolved.name || 'Playlist',
+          image: resolved.image || resolved.tracks[0]?.image || null,
+          source: resolved.source,
+          tracks: resolved.tracks,
+        },
+        url
+      );
       break;
     }
+    case 'add_song':
+    case 'add_media': {
+      // Single song: host or allowPartyAdd. Entire playlist: host only.
+      const url = String(msg.url || '').slice(0, 500);
+      send(ws, 'loading', { what: 'import' });
+      const resolved = await resolveMediaUrl(url);
+      const fromPlaylist = resolved.kind === 'playlist' || resolved.tracks.length > 1;
+      room.appendTracks(pid, resolved.tracks, {
+        fromPlaylist,
+        label: resolved.name,
+      });
+      break;
+    }
+    case 'roster_include':
+      room.setSongIncluded(pid, msg.trackId ?? msg.id, Boolean(msg.included ?? msg.on));
+      break;
+    case 'roster_bulk':
+      room.bulkSetIncluded(pid, msg.mode || msg.bulk);
+      break;
     case 'start':
       room.startTournament(pid);
       break;

@@ -56,14 +56,27 @@ function sanitizePfp(raw) {
 
 function slimSong(s) {
   if (!s || !s.id) return null;
+  const source =
+    s.source ||
+    (s.youtubeId || s.youtubeUrl ? 'youtube' : 'spotify');
   return {
     id: s.id,
     name: s.name || 'Unknown',
     artists: s.artists || '',
     image: s.image || null,
-    source: s.source || 'spotify',
+    source,
     spotifyUrl: s.spotifyUrl || null,
+    youtubeUrl: s.youtubeUrl || null,
+    youtubeId: s.youtubeId || (source === 'youtube' ? s.id : null),
+    embedUrl: s.embedUrl || null,
   };
+}
+
+function rosterSourceLabel(tracks) {
+  if (!tracks?.length) return 'mixed';
+  const sources = new Set(tracks.map((t) => t.source || 'spotify'));
+  if (sources.size === 1) return [...sources][0];
+  return 'mixed';
 }
 
 export class Room {
@@ -84,6 +97,8 @@ export class Room {
       playMode: 'desync', // desync | sync
       voteSeconds: DEFAULT_VOTE_SECONDS,
       backupSeconds: HOST_BACKUP_SECONDS,
+      /** If true, any connected player can add songs by link (host still curates). */
+      allowPartyAddSongs: false,
     };
     /** @type {Map<string, object>} */
     this.players = new Map();
@@ -91,6 +106,15 @@ export class Room {
     this.bans = new Set();
     this.playlistMeta = null;
     this.playlistUrl = '';
+    /**
+     * Full lobby roster (all songs shown). Tournament uses only selected ids.
+     * @type {object[]|null}
+     */
+    this._rawTracks = null;
+    /** @type {Set<string>} */
+    this._selectedIds = new Set();
+    /** trackId → playerId who added (playlist bulk loads leave this unset) */
+    this._trackAddedBy = new Map();
     this.tournament = null;
     /** @type {Map<string, { side: 'a'|'b', random: boolean }>} */
     this.votes = new Map();
@@ -231,8 +255,15 @@ export class Room {
         .filter((p) => !p.banned)
         .map((p) => this.publicPlayer(p))
         .sort((a, b) => a.joinedAt - b.joinedAt),
-      playlist: this.playlistMeta,
+      playlist: this.playlistMeta
+        ? {
+            ...this.playlistMeta,
+            trackCount: this._rawTracks?.length || this.playlistMeta.trackCount || 0,
+            selectedCount: this._selectedIds?.size ?? this.playlistMeta.selectedCount,
+          }
+        : null,
       playlistUrl: this.playlistUrl || '',
+      roster: this.publicRoster(),
       error: this.error || '',
       match: match
         ? {
@@ -458,44 +489,107 @@ export class Room {
       const n = Math.round(partial.voteSeconds);
       this.settings.voteSeconds = Math.min(600, Math.max(30, n));
     }
+    if (typeof partial.allowPartyAddSongs === 'boolean') {
+      this.settings.allowPartyAddSongs = partial.allowPartyAddSongs;
+    } else if (
+      partial.allowPartyAddSongs === '1' ||
+      partial.allowPartyAddSongs === 1 ||
+      partial.allowPartyAddSongs === 'true'
+    ) {
+      this.settings.allowPartyAddSongs = true;
+    } else if (
+      partial.allowPartyAddSongs === '0' ||
+      partial.allowPartyAddSongs === 0 ||
+      partial.allowPartyAddSongs === 'false'
+    ) {
+      this.settings.allowPartyAddSongs = false;
+    }
     this.broadcast();
+  }
+
+  _rosterSelectedTracks() {
+    if (!this._rawTracks?.length) return [];
+    return this._rawTracks.filter((t) => t?.id && this._selectedIds.has(t.id));
+  }
+
+  _syncPlaylistMetaCounts() {
+    if (!this.playlistMeta) return;
+    this.playlistMeta.trackCount = this._rawTracks?.length || 0;
+    this.playlistMeta.selectedCount = this._selectedIds.size;
+  }
+
+  /**
+   * Public roster snapshot for lobby UI (all players see songs; only host edits inclusion).
+   */
+  publicRoster() {
+    if (this.phase !== PHASE.LOBBY || !this._rawTracks?.length) return null;
+    const nameById = new Map();
+    for (const p of this.players.values()) {
+      nameById.set(p.id, p.displayName);
+    }
+    return {
+      tracks: this._rawTracks.map((t, idx) => {
+        const adderId = this._trackAddedBy.get(t.id) || null;
+        return {
+          ...slimSong(t),
+          included: this._selectedIds.has(t.id),
+          addedById: adderId,
+          addedByName: adderId ? nameById.get(adderId) || 'Player' : null,
+          index: idx + 1,
+        };
+      }),
+      total: this._rawTracks.length,
+      selected: this._selectedIds.size,
+    };
   }
 
   /**
    * Host loaded playlist JSON from API (server-side fetch preferred via hub).
+   * Loads into lobby roster (all included); host curates before Start.
    */
   setPlaylist(playerId, playlist, url) {
     this.assertHost(playerId);
     this.touch();
     this.error = '';
 
-    if (!playlist?.tracks || playlist.tracks.length < 2) {
-      this.error = 'Need at least 2 playable songs.';
+    if (!playlist?.tracks || playlist.tracks.length < 1) {
+      this.error = 'No playable songs found.';
       this.playlistMeta = null;
       this.playlistUrl = '';
+      this._rawTracks = null;
+      this._selectedIds.clear();
+      this._trackAddedBy.clear();
       this.broadcast();
       return;
     }
 
-    // Party v1: Spotify only
-    const source = playlist.source || 'spotify';
-    if (source === 'youtube' || playlist.tracks.some((t) => t.source === 'youtube')) {
-      this.error = 'Party mode is Spotify-only for now. Solo still supports YouTube.';
-      this.playlistMeta = null;
-      this.playlistUrl = '';
+    // Dedupe preserving order (Spotify + YouTube allowed; mix OK)
+    const seen = new Set();
+    const tracks = [];
+    for (const raw of playlist.tracks) {
+      const t = slimSong(raw);
+      if (!t?.id || seen.has(t.id)) continue;
+      seen.add(t.id);
+      tracks.push(t);
+    }
+    if (tracks.length < 1) {
+      this.error = 'No playable songs found.';
       this.broadcast();
       return;
     }
 
     this.playlistUrl = String(url || '').slice(0, 500);
     this.playlistMeta = {
-      id: playlist.id,
+      id: playlist.id || 'custom',
       name: playlist.name || 'Playlist',
-      image: playlist.image || null,
-      trackCount: playlist.tracks.length,
-      source: 'spotify',
+      image: playlist.image || tracks[0]?.image || null,
+      trackCount: tracks.length,
+      selectedCount: tracks.length,
+      source: rosterSourceLabel(tracks) || playlist.source || 'mixed',
     };
-    this._rawTracks = playlist.tracks.map(slimSong).filter(Boolean);
+    this._rawTracks = tracks;
+    this._selectedIds = new Set(tracks.map((t) => t.id));
+    this._trackAddedBy.clear();
     this.phase = PHASE.LOBBY;
     this.locked = false;
     this.tournament = null;
@@ -506,11 +600,179 @@ export class Room {
     this.broadcast();
   }
 
+  /**
+   * Append songs to the lobby roster.
+   * - Single track: host always; others if allowPartyAddSongs
+   * - Playlist / multi-track: **host only**
+   * @param {string} playerId
+   * @param {object[]} rawTracks
+   * @param {{ fromPlaylist?: boolean, label?: string }} [opts]
+   */
+  appendTracks(playerId, rawTracks, opts = {}) {
+    this.touch();
+    const p = this.players.get(playerId);
+    if (!p?.connected || p.banned) {
+      const err = new Error('You cannot add songs.');
+      err.code = 'NO_ADD';
+      throw err;
+    }
+    if (this.phase !== PHASE.LOBBY || this.locked) {
+      const err = new Error('Songs can only be added in the lobby.');
+      err.code = 'BAD_PHASE';
+      throw err;
+    }
+
+    const list = (Array.isArray(rawTracks) ? rawTracks : [])
+      .map(slimSong)
+      .filter(Boolean);
+    if (!list.length) {
+      const err = new Error('No songs to add.');
+      err.code = 'BAD_SONG';
+      throw err;
+    }
+
+    const fromPlaylist = Boolean(opts.fromPlaylist) || list.length > 1;
+    if (fromPlaylist && !p.isHost) {
+      const err = new Error(
+        'Only the host can add entire playlists. You can still add a single song link.'
+      );
+      err.code = 'HOST_PLAYLIST_ONLY';
+      throw err;
+    }
+    if (!p.isHost && !this.settings.allowPartyAddSongs) {
+      const err = new Error('Only the host can add songs (party adding is off).');
+      err.code = 'NOT_ALLOWED';
+      throw err;
+    }
+
+    if (!this._rawTracks) {
+      if (!p.isHost) {
+        const err = new Error('Host needs to load a playlist first.');
+        err.code = 'NO_PLAYLIST';
+        throw err;
+      }
+      this._rawTracks = [];
+      this._selectedIds = new Set();
+      this._trackAddedBy.clear();
+      this.playlistMeta = {
+        id: 'custom',
+        name: opts.label || 'Party mix',
+        image: list[0]?.image || null,
+        trackCount: 0,
+        selectedCount: 0,
+        source: 'mixed',
+      };
+      this.playlistUrl = this.playlistUrl || '';
+    }
+
+    let added = 0;
+    let reselected = 0;
+    for (const song of list) {
+      if (this._rawTracks.length >= 500) break;
+      const existing = this._rawTracks.find((t) => t.id === song.id);
+      if (existing) {
+        if (!this._selectedIds.has(song.id)) {
+          this._selectedIds.add(song.id);
+          reselected += 1;
+        }
+        continue;
+      }
+      this._rawTracks.push(song);
+      this._selectedIds.add(song.id);
+      this._trackAddedBy.set(song.id, playerId);
+      added += 1;
+    }
+
+    if (!this.playlistMeta?.image && list[0]?.image) {
+      this.playlistMeta.image = list[0].image;
+    }
+    // If host pasted another playlist name and we still have a generic title, soft-update
+    if (
+      p.isHost &&
+      opts.label &&
+      this.playlistMeta &&
+      (!this.playlistMeta.name ||
+        this.playlistMeta.name === 'Party mix' ||
+        this.playlistMeta.name === 'Playlist')
+    ) {
+      this.playlistMeta.name = opts.label;
+    }
+    if (this.playlistMeta) {
+      this.playlistMeta.source = rosterSourceLabel(this._rawTracks);
+    }
+
+    this.error = '';
+    this._syncPlaylistMetaCounts();
+    this.broadcast();
+    return { added, reselected, total: this._rawTracks.length };
+  }
+
+  /**
+   * Add one track (guest-safe when allowPartyAddSongs). Prefer appendTracks for playlists.
+   */
+  addSong(playerId, track) {
+    return this.appendTracks(playerId, [track], { fromPlaylist: false });
+  }
+
+  /** Host only: include/exclude a song from the upcoming bracket. */
+  setSongIncluded(playerId, trackId, included) {
+    this.assertHost(playerId);
+    this.touch();
+    if (this.phase !== PHASE.LOBBY || this.locked) {
+      const err = new Error('Can only edit the roster in the lobby.');
+      err.code = 'BAD_PHASE';
+      throw err;
+    }
+    const id = String(trackId || '');
+    if (!this._rawTracks?.some((t) => t.id === id)) {
+      const err = new Error('Song not in roster.');
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+    if (included) this._selectedIds.add(id);
+    else this._selectedIds.delete(id);
+    this._syncPlaylistMetaCounts();
+    this.broadcast();
+  }
+
+  /** Host only: select all / none / invert. */
+  bulkSetIncluded(playerId, mode) {
+    this.assertHost(playerId);
+    this.touch();
+    if (this.phase !== PHASE.LOBBY || this.locked || !this._rawTracks?.length) {
+      const err = new Error('Can only edit the roster in the lobby.');
+      err.code = 'BAD_PHASE';
+      throw err;
+    }
+    if (mode === 'all') {
+      this._selectedIds = new Set(this._rawTracks.map((t) => t.id));
+    } else if (mode === 'none') {
+      this._selectedIds.clear();
+    } else if (mode === 'invert') {
+      const next = new Set();
+      for (const t of this._rawTracks) {
+        if (!this._selectedIds.has(t.id)) next.add(t.id);
+      }
+      this._selectedIds = next;
+    } else {
+      const err = new Error('Unknown bulk mode.');
+      err.code = 'BAD_MODE';
+      throw err;
+    }
+    this._syncPlaylistMetaCounts();
+    this.broadcast();
+  }
+
   startTournament(playerId) {
     this.assertHost(playerId);
     this.touch();
-    if (!this._rawTracks || this._rawTracks.length < 2) {
-      const err = new Error('Load a Spotify playlist first.');
+    const selected = this._rosterSelectedTracks();
+    if (selected.length < 2) {
+      const err = new Error(
+        this._rawTracks?.length
+          ? 'Select at least 2 songs for the tournament.'
+          : 'Load a Spotify playlist (or add songs) first.'
+      );
       err.code = 'NO_PLAYLIST';
       throw err;
     }
@@ -528,9 +790,9 @@ export class Room {
         id: this.playlistMeta?.id,
         name: this.playlistMeta?.name,
         image: this.playlistMeta?.image,
-        source: 'spotify',
+        source: rosterSourceLabel(selected) || this.playlistMeta?.source || 'mixed',
       },
-      this._rawTracks,
+      selected,
       this.settings.seeding
     );
     this.locked = true;
@@ -904,7 +1166,7 @@ export class Room {
     this.noPreviewSide = null;
     this.abstentions = [];
     this.error = '';
-    // Keep last playlist meta as a hint; host can load a new link
+    // Keep last roster + meta so host can re-curate or load a new link
     this.clearVoteTimer();
     this.broadcast();
   }
@@ -1116,6 +1378,8 @@ export class Room {
     // Drop heavy refs so GC can free playlist + tournament graphs
     this.tournament = null;
     this._rawTracks = null;
+    this._selectedIds.clear();
+    this._trackAddedBy.clear();
     this.playlistMeta = null;
     this.votes.clear();
     this.reveal = null;
