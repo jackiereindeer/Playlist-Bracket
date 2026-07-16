@@ -213,6 +213,17 @@ async function handle(ws, ctx, msg, type, rooms, hub) {
     case 'rate_continue':
       room.groupRateContinue(pid);
       break;
+    case 'lobby_ready':
+      room.setLobbyReady(pid, msg.ready !== false && msg.ready !== 0);
+      break;
+    case 'group_rate_skip':
+    case 'rate_skip':
+      room.skipGroupRateSong(pid);
+      break;
+    case 'group_rate_rematch':
+    case 'rate_rematch':
+      room.rematchGroupRate(pid);
+      break;
     case 'vote':
       room.castVote(pid, msg.side, { random: false });
       break;

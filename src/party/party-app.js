@@ -34,6 +34,15 @@ import { buildPartyBracketHtml, wirePartyBracketTabs } from './party-bracket.js'
 const PREFS_KEY_LEGACY = 'playlist-bracket-party-prefs-v1';
 const VOL_KEY = 'playlist-bracket-party-vol-v1';
 const PLAYMODE_PREF_KEY = 'playlist-bracket-party-playmode-v1';
+
+function hapticTap() {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      navigator.vibrate(12);
+    }
+  } catch {
+  }
+}
 /** Custom PFP image (data URL) — saved in this browser only; name/color still fresh each visit */
 const PFP_KEY = 'playlist-bracket-party-pfp-v1';
 const PFP_MAX_EDGE = 128; // px — keeps chips sharp, payloads small
@@ -305,6 +314,11 @@ export function startPartyApp(root, opts) {
     if (Number.isFinite(v)) localVolume = Math.min(1, Math.max(0, v));
   } catch {
   }
+  /** For WS reconnect after drop */
+  let reconnectAttempt = 0;
+  let reconnectTimer = 0;
+  let intentionalClose = false;
+  let lastJoinPayload = null; // { mode: 'create'|'join', code?, ...identity }
 
   // Fresh identity every party session / full page load
   clearLegacyIdentityPrefs();
@@ -728,11 +742,27 @@ export function startPartyApp(root, opts) {
     if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
     connecting = true;
     gateError = '';
-    render();
+    if (screen !== 'live') render();
+    intentionalClose = false;
     ws = new WebSocket(wsUrl());
     ws.onopen = () => {
       connecting = false;
-      statusLine = '';
+      reconnectAttempt = 0;
+      if (statusLine === 'Reconnecting…') statusLine = '';
+      // Re-auth after reconnect if we were mid-session
+      if (lastJoinPayload && screen === 'live') {
+        const p = lastJoinPayload;
+        if (p.mode === 'join' && p.code) {
+          send('join', {
+            code: p.code,
+            displayName: p.displayName,
+            color: p.color,
+            avatar: p.avatar,
+            pfp: p.pfp || null,
+            sessionToken: getTabSessionToken(),
+          });
+        }
+      }
     };
     ws.onmessage = (ev) => {
       let msg;
@@ -759,6 +789,17 @@ export function startPartyApp(root, opts) {
         if (state?.you?.sessionToken) {
           // Tab session only (rejoin same tab if socket drops) — not cross-refresh identity
           setTabSessionToken(state.you.sessionToken);
+        }
+        // Always reconnect via join + room code (never re-create a room)
+        if (state?.code) {
+          lastJoinPayload = {
+            mode: 'join',
+            code: state.code,
+            displayName: form.displayName || state.you?.displayName || 'Player',
+            color: form.color || state.you?.color || 'purple',
+            avatar: form.avatar || state.you?.avatar || 'frog',
+            pfp: form.pfp || state.you?.pfp || null,
+          };
         }
         // Continuous audio ONLY for winner celebration → final champion results
         if (prevPhase === 'winner' && state?.phase === 'champion') {
@@ -899,12 +940,29 @@ export function startPartyApp(root, opts) {
     };
     ws.onclose = () => {
       connecting = false;
-      if (endedByHost) {
-        // Already handled by "ended" message
+      if (destroyed || intentionalClose || endedByHost) {
+        return;
+      }
+      if (screen === 'live' && lastJoinPayload && reconnectAttempt < 8) {
+        // Soft reconnect — free tier blips / brief network drops
+        statusLine = 'Reconnecting…';
+        reconnectAttempt += 1;
+        const delay = Math.min(8000, 400 * reconnectAttempt);
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(() => {
+          if (destroyed || endedByHost) return;
+          ws = null;
+          connect();
+          // Soft re-render status line
+          const st = root.querySelector('.party-status');
+          if (st) st.textContent = statusLine;
+          else render();
+        }, delay);
+        const st = root.querySelector('.party-status');
+        if (st) st.textContent = statusLine;
         return;
       }
       if (screen === 'live') {
-        // Host ended room or server died — leave the live UI either way
         hardStopAudio();
         state = null;
         screen = 'gate';
@@ -913,6 +971,7 @@ export function startPartyApp(root, opts) {
           gateError ||
           'Disconnected from the room. It may have ended — ask the host for a new code or link.';
         statusLine = '';
+        lastJoinPayload = null;
         render();
         return;
       }
@@ -920,16 +979,19 @@ export function startPartyApp(root, opts) {
     };
     ws.onerror = () => {
       connecting = false;
+      if (screen === 'live') return; // onclose handles reconnect
       gateError =
-        'Could not connect to party server. Is `npm run dev` running (API on :3001)?';
+        'Could not connect to party server. Free hosts may be waking up — wait 30–60s and try again.';
       render();
     };
   }
 
   function send(type, payload = {}) {
     if (!ws || ws.readyState !== 1) {
-      gateError = 'Not connected.';
-      render();
+      if (screen !== 'live') {
+        gateError = 'Not connected.';
+        render();
+      }
       return;
     }
     ws.send(JSON.stringify({ type, ...payload }));
@@ -939,6 +1001,13 @@ export function startPartyApp(root, opts) {
     endedByHost = false;
     gateError = '';
     chatMessages = [];
+    lastJoinPayload = {
+      mode: 'create',
+      displayName: form.displayName,
+      color: form.color,
+      avatar: form.avatar,
+      pfp: form.pfp || null,
+    };
     const epoch = ++connectEpoch;
     connect();
     const tryCreate = () => {
@@ -964,9 +1033,17 @@ export function startPartyApp(root, opts) {
     endedByHost = false;
     gateError = '';
     chatMessages = []; // only messages after join (3B)
+    const code = normalizeRoomCode(form.code);
+    lastJoinPayload = {
+      mode: 'join',
+      code,
+      displayName: form.displayName,
+      color: form.color,
+      avatar: form.avatar,
+      pfp: form.pfp || null,
+    };
     const epoch = ++connectEpoch;
     connect();
-    const code = normalizeRoomCode(form.code);
     const tryJoin = () => {
       if (destroyed || epoch !== connectEpoch) return;
       if (ws?.readyState === 1) {
@@ -1901,6 +1978,12 @@ export function startPartyApp(root, opts) {
         lockBtn.disabled = true;
         lockBtn.textContent = 'Locked in';
       }
+      const badge = root.querySelector('#gr-locked-badge');
+      if (badge) {
+        badge.hidden = false;
+        badge.classList.remove('is-hidden');
+        badge.textContent = `You locked ${formatRateScore(groupRateDraft)}`;
+      }
       const slider = root.querySelector('#gr-slider');
       if (slider) {
         slider.disabled = false;
@@ -1986,6 +2069,13 @@ export function startPartyApp(root, opts) {
             <p class="rating-big${hasPick ? '' : ' is-empty'}" id="gr-big">${
               hasPick ? formatRateScore(my) : '—'
             }</p>
+            ${
+              lockedIn && hasPick && !dirty
+                ? `<p class="gr-locked-badge" id="gr-locked-badge">You locked ${formatRateScore(
+                    my
+                  )}</p>`
+                : `<p class="gr-locked-badge is-hidden" id="gr-locked-badge" hidden></p>`
+            }
           </div>
           <div class="rating-num-row" role="group" aria-label="Rating 0 to 10">${buttons}</div>
           <div class="rating-fine${hasPick ? '' : ' is-disabled'}">
@@ -2011,6 +2101,11 @@ export function startPartyApp(root, opts) {
                     : 'Lock in rating'
               }
             </button>
+            ${
+              isHost
+                ? `<button type="button" class="ghost" id="gr-skip" title="Move this song to the end of the queue">Skip for later</button>`
+                : ''
+            }
           </div>
           <p class="setup-note muted small"><strong>${rated}/${raters}</strong> locked in${
               raters - rated > 0
@@ -2032,22 +2127,24 @@ export function startPartyApp(root, opts) {
     const myReady = Boolean(gr.myReady);
     const tab = groupRateResultsTab;
 
+    const myId = s.you?.id;
     const cards = ranking
       .map((row, rank) => {
         const song = row.song || {};
         const art = song.image
           ? `<img src="${esc(song.image)}" alt="" loading="lazy" />`
           : `<div class="rating-result-fallback">🎵</div>`;
+        const mySc = (row.scores || []).find((sc) => sc.playerId === myId);
         const scores = (row.scores || [])
           .slice()
           .sort((a, b) => b.score - a.score)
           .map(
             (sc) =>
-              `<span class="gr-score-chip" style="--chip:${esc(
-                colorHex(sc.color, colors)
-              )}">${esc(sc.displayName)} <strong>${formatRateScore(
-                sc.score
-              )}</strong></span>`
+              `<span class="gr-score-chip${
+                sc.playerId === myId ? ' is-me' : ''
+              }" style="--chip:${esc(colorHex(sc.color, colors))}">${esc(
+                sc.displayName
+              )} <strong>${formatRateScore(sc.score)}</strong></span>`
           )
           .join('');
         return `
@@ -2060,6 +2157,16 @@ export function startPartyApp(root, opts) {
             <div class="rating-result-meta">
               <strong class="rating-result-name">${esc(song.name || '')}</strong>
               <span class="rating-result-artists muted small">${esc(song.artists || '')}</span>
+              <p class="gr-you-line muted small">
+                Avg ${formatRateScore(row.average)}
+                ${
+                  mySc
+                    ? ` · you ${formatRateScore(mySc.score)} · your rank #${
+                        rank + 1
+                      }`
+                    : ''
+                }
+              </p>
               <details class="gr-expand">
                 <summary class="muted small">Everyone’s scores (${row.count || 0})</summary>
                 <div class="gr-score-list">${scores || '<span class="muted small">—</span>'}</div>
@@ -2127,6 +2234,7 @@ export function startPartyApp(root, opts) {
               }</div>`
         }
         <div class="form-actions rating-results-actions">
+          <button type="button" class="ghost" id="gr-export">Copy results</button>
           <button type="button" id="gr-continue" ${myReady ? 'disabled' : ''}>
             ${myReady ? `Waiting for others… (${ready}/${readyTotal})` : `Continue (${ready}/${readyTotal})`}
           </button>
@@ -2134,7 +2242,10 @@ export function startPartyApp(root, opts) {
         <p class="setup-note">Everyone must press Continue to return to the lobby (same room).</p>
         ${
           isHost
-            ? `<button type="button" class="ghost small-btn" id="p-new-lobby">Force new lobby (host)</button>`
+            ? `<div class="form-actions">
+                <button type="button" id="gr-rematch">Rate same list again</button>
+                <button type="button" class="ghost small-btn" id="p-new-lobby">Force new lobby</button>
+              </div>`
             : ''
         }
       </div>
@@ -2335,7 +2446,33 @@ export function startPartyApp(root, opts) {
             : ''
         }
 
+        ${lobbyReadySection(s)}
         ${isHost ? hostModeration(s) : ''}
+      </div>
+    `;
+  }
+
+  function lobbyReadySection(s) {
+    const readyIds = new Set(s.lobbyReadyIds || []);
+    const players = s.players || [];
+    const readyN = players.filter((p) => readyIds.has(p.id)).length;
+    const chips = players
+      .map((p) => {
+        const on = readyIds.has(p.id);
+        return chip(p, { grey: !on });
+      })
+      .join('');
+    const meReady = Boolean(s.myLobbyReady);
+    return `
+      <div class="party-ready-block">
+        <div class="party-ready-head">
+          <h3 class="small">Ready check</h3>
+          <span class="muted small">${readyN}/${players.length} ready</span>
+        </div>
+        <div class="party-ready-chips">${chips || '<span class="muted small">—</span>'}</div>
+        <button type="button" class="ghost small-btn" id="p-ready-toggle">
+          ${meReady ? 'Not ready' : 'I’m ready'}
+        </button>
       </div>
     `;
   }
@@ -2751,8 +2888,21 @@ export function startPartyApp(root, opts) {
         if (!canRate || groupRateDraft == null) return;
         const score = clampRateScore(groupRateDraft);
         groupRateDraft = score;
+        hapticTap();
         send('rate_submit', { score });
         refreshDraftUi();
+        const badge = root.querySelector('#gr-locked-badge');
+        if (badge) {
+          badge.hidden = false;
+          badge.classList.remove('is-hidden');
+          badge.textContent = `You locked ${formatRateScore(score)}`;
+        }
+      });
+
+      root.querySelector('#gr-skip')?.addEventListener('click', () => {
+        if (!isHost) return;
+        hardStopAudio();
+        send('rate_skip');
       });
 
       root.querySelector('#gr-play')?.addEventListener('click', () => {
@@ -2780,9 +2930,40 @@ export function startPartyApp(root, opts) {
       root.querySelector('#gr-continue')?.addEventListener('click', () => {
         send('rate_continue');
       });
+      root.querySelector('#gr-export')?.addEventListener('click', async () => {
+        const gr = s.groupRate || {};
+        const ranking = gr.ranking || [];
+        const lines = [
+          `Group Rate — ${gr.playlistName || s.playlist?.name || 'Results'}`,
+          '',
+          ...ranking.map(
+            (row, i) =>
+              `${i + 1}. ${row.song?.name || '?'} — avg ${formatRateScore(
+                row.average
+              )} (${(row.scores || [])
+                .map((sc) => `${sc.displayName}: ${formatRateScore(sc.score)}`)
+                .join(', ')})`
+          ),
+        ];
+        const text = lines.join('\n');
+        const btn = root.querySelector('#gr-export');
+        await copyText(text, btn, 'Copied!');
+      });
+      root.querySelector('#gr-rematch')?.addEventListener('click', () => {
+        hardStopAudio();
+        send('rate_rematch');
+      });
       root.querySelector('#p-new-lobby')?.addEventListener('click', () => {
         hardStopAudio();
         send('new_lobby');
+      });
+    }
+
+    // Lobby ready toggle
+    if (s.phase === 'lobby') {
+      root.querySelector('#p-ready-toggle')?.addEventListener('click', () => {
+        send('lobby_ready', { ready: !s.myLobbyReady });
+        hapticTap();
       });
     }
 
@@ -2811,10 +2992,12 @@ export function startPartyApp(root, opts) {
       });
       root.querySelectorAll('[data-vote]').forEach((btn) => {
         btn.addEventListener('click', () => {
+          hapticTap();
           send('vote', { side: btn.getAttribute('data-vote') });
         });
       });
       root.querySelector('#p-random')?.addEventListener('click', () => {
+        hapticTap();
         send('vote_random');
       });
       root.querySelector('#p-pause')?.addEventListener('click', () => {
@@ -2858,20 +3041,79 @@ export function startPartyApp(root, opts) {
   }
 
   function onKey(e) {
-    if (screen !== 'live' || !state || state.phase !== 'match' || state.paused) return;
+    if (screen !== 'live' || !state) return;
     const tag = e.target?.tagName;
     // Don't steal keys while typing in chat or other fields
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     if (e.target?.id === 'party-chat-input') return;
+    if (e.target?.isContentEditable) return;
+
+    // Space = play/pause current party preview
+    if (e.key === ' ' || e.code === 'Space') {
+      e.preventDefault();
+      if (state.phase === 'rate_song') {
+        root.querySelector('#gr-play')?.click();
+      } else if (state.phase === 'match') {
+        const side = playSide === 'b' ? 'b' : 'a';
+        root.querySelector(`[data-play="${side}"]`)?.click();
+      }
+      return;
+    }
+
+    if (state.phase === 'rate_song' && state.groupRate?.canRate) {
+      // 0–9 set integer; 0 twice or Shift+0 → 10? Use '0' with no prior for 0; 't' for ten optional
+      if (e.key >= '0' && e.key <= '9') {
+        e.preventDefault();
+        let n = Number(e.key);
+        // Pressing 1 then 0 quickly is hard; allow '=' or ')' for 10
+        if (e.key === '0' && (e.shiftKey || e.altKey)) n = 10;
+        groupRateDraft = n;
+        const big = root.querySelector('#gr-big');
+        if (big) {
+          big.textContent = formatRateScore(n);
+          big.classList.remove('is-empty');
+        }
+        root.querySelectorAll('[data-gr-btn]').forEach((btn) => {
+          btn.classList.toggle(
+            'is-active',
+            Number(btn.getAttribute('data-gr-btn')) === n
+          );
+        });
+        const slider = root.querySelector('#gr-slider');
+        if (slider) {
+          slider.disabled = false;
+          slider.value = String(n);
+        }
+        root.querySelector('#gr-minus')?.removeAttribute('disabled');
+        root.querySelector('#gr-plus')?.removeAttribute('disabled');
+        root.querySelector('.rating-fine')?.classList.remove('is-disabled');
+        const lockBtn = root.querySelector('#gr-lock');
+        if (lockBtn) {
+          lockBtn.disabled = false;
+          lockBtn.textContent = 'Lock in rating';
+        }
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        root.querySelector('#gr-lock')?.click();
+        return;
+      }
+    }
+
+    if (state.phase !== 'match' || state.paused) return;
     if ((state.votedPlayerIds || []).includes(state.you?.id)) return;
     if (e.key === '1') {
       e.preventDefault();
+      hapticTap();
       send('vote', { side: 'a' });
     } else if (e.key === '2') {
       e.preventDefault();
+      hapticTap();
       send('vote', { side: 'b' });
     } else if (e.key === 'r' || e.key === 'R') {
       e.preventDefault();
+      hapticTap();
       send('vote_random');
     }
   }
@@ -2894,9 +3136,11 @@ export function startPartyApp(root, opts) {
   return {
     destroy() {
       destroyed = true;
+      intentionalClose = true;
       uiEpoch += 1;
       playGen += 1;
       connectEpoch += 1;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       window.removeEventListener('keydown', onKey);
       if (onPfpPaste) {
         document.removeEventListener('paste', onPfpPaste);
@@ -2913,6 +3157,7 @@ export function startPartyApp(root, opts) {
       }
       ws = null;
       state = null;
+      lastJoinPayload = null;
     },
   };
 }

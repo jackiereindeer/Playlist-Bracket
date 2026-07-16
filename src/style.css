@@ -2565,6 +2565,63 @@ body[data-stage='quarters'] .vs-badge {
   border-color: color-mix(in srgb, #fbbf24 45%, var(--border));
 }
 
+#cold-start-banner {
+  position: fixed;
+  left: 50%;
+  top: 0.75rem;
+  transform: translateX(-50%);
+  z-index: 1000;
+  max-width: min(92vw, 420px);
+  padding: 0.75rem 1rem;
+  border-radius: 0.85rem;
+  background: color-mix(in srgb, #0f172a 92%, #fbbf24);
+  border: 1.5px solid color-mix(in srgb, #fbbf24 55%, transparent);
+  color: #fff;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  text-align: center;
+}
+
+#cold-start-banner[hidden] {
+  display: none !important;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+.roster-search-field {
+  margin-bottom: 0.35rem;
+}
+
+.roster-row {
+  grid-template-columns: auto auto auto 1fr auto;
+}
+
+.roster-drag {
+  cursor: grab;
+  opacity: 0.45;
+  font-size: 0.85rem;
+  user-select: none;
+  padding: 0 0.1rem;
+}
+
+.roster-row.is-dragging {
+  opacity: 0.5;
+}
+
+.roster-row.is-drag-over {
+  outline: 1px dashed var(--accent);
+}
+
 /* ─── Rating Mode ───────────────────────────────────────── */
 .rating-page {
   max-width: 720px;
@@ -3257,6 +3314,66 @@ body[data-stage='quarters'] .vs-badge {
   border-radius: 999px;
   background: color-mix(in srgb, var(--chip, var(--accent)) 22%, var(--bg));
   border: 1px solid color-mix(in srgb, var(--chip, var(--accent)) 40%, var(--border));
+}
+
+.gr-score-chip.is-me {
+  outline: 1px solid var(--accent);
+}
+
+.gr-locked-badge {
+  margin: 0.15rem 0 0;
+  font-size: 0.9rem;
+  font-weight: 650;
+  color: #fbbf24;
+}
+
+.gr-locked-badge.is-hidden,
+.gr-locked-badge[hidden] {
+  display: none;
+}
+
+.gr-you-line {
+  margin: 0.15rem 0 0;
+}
+
+.party-ready-block {
+  margin-top: 0.85rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.party-ready-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.party-ready-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+}
+
+/* Mobile chat: sticky toggle, keep match usable */
+@media (max-width: 900px) {
+  .party-chat-toggle {
+    position: fixed;
+    right: 0.75rem;
+    bottom: 0.75rem;
+    z-index: 40;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    min-width: 3rem;
+    min-height: 2.75rem;
+  }
+  .party-chat.is-open .party-chat-toggle {
+    position: absolute;
+    right: 0.35rem;
+    bottom: auto;
+    top: 0.35rem;
+  }
 }
 
 .gr-matrix-wrap {

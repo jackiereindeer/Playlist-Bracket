@@ -122,6 +122,8 @@ export class Room {
     this.rateArchive = [];
     /** @type {Set<string>} players who pressed Continue on results */
     this.rateReadyNext = new Set();
+    /** Lobby “I’m ready” chips (optional; cleared on start) */
+    this.lobbyReadyIds = new Set();
     /** @type {Map<string, object>} */
     this.players = new Map();
     /** @type {Set<string>} session tokens banned from this room */
@@ -277,6 +279,13 @@ export class Room {
         .filter((p) => !p.banned)
         .map((p) => this.publicPlayer(p))
         .sort((a, b) => a.joinedAt - b.joinedAt),
+      lobbyReadyIds:
+        this.phase === PHASE.LOBBY ? [...this.lobbyReadyIds] : [],
+      myLobbyReady: Boolean(
+        this.phase === PHASE.LOBBY &&
+          forPlayerId &&
+          this.lobbyReadyIds.has(forPlayerId)
+      ),
       playlist: this.playlistMeta
         ? {
             ...this.playlistMeta,
@@ -467,6 +476,7 @@ export class Room {
     p.connected = false;
     p.ws = null;
     this.touch();
+    this.lobbyReadyIds.delete(playerId);
 
     if (p.isHost) {
       this.transferHost();
@@ -504,6 +514,92 @@ export class Room {
     this.rateSongScores = new Map();
     this.rateArchive = [];
     this.rateReadyNext = new Set();
+  }
+
+  /** Toggle “I’m ready” in lobby (cosmetic coordination for host). */
+  setLobbyReady(playerId, ready) {
+    this.touch();
+    if (this.phase !== PHASE.LOBBY || this.locked) return;
+    const p = this.players.get(playerId);
+    if (!p?.connected || p.banned) return;
+    if (ready) this.lobbyReadyIds.add(playerId);
+    else this.lobbyReadyIds.delete(playerId);
+    this.broadcast();
+  }
+
+  /**
+   * Host skips current Group Rate song → move to end of queue for later.
+   * Clears lock-ins for that song (everyone will rate it again when it returns).
+   */
+  skipGroupRateSong(playerId) {
+    this.assertHost(playerId);
+    this.touch();
+    if (this.phase !== PHASE.RATE_SONG || !this.rateTracks?.length) {
+      const err = new Error('Nothing to skip.');
+      err.code = 'BAD_PHASE';
+      throw err;
+    }
+    if (this.rateIndex >= this.rateTracks.length) return;
+    const [song] = this.rateTracks.splice(this.rateIndex, 1);
+    if (song) this.rateTracks.push(song);
+    this.rateSongScores = new Map();
+    // index stays pointing at what was “next”; after splice that’s the new current
+    if (this.rateIndex >= this.rateTracks.length) {
+      this.rateIndex = 0;
+    }
+    // If only one song left looping forever is fine; if empty shouldn't happen
+    this.broadcast();
+  }
+
+  /** Host restarts Group Rate on the same locked track list (from last run / current roster). */
+  rematchGroupRate(playerId) {
+    this.assertHost(playerId);
+    this.touch();
+    if (this.phase !== PHASE.RATE_RESULTS && this.phase !== PHASE.LOBBY) {
+      const err = new Error('Rematch is available after Group Rate results (or from lobby).');
+      err.code = 'BAD_PHASE';
+      throw err;
+    }
+    // Prefer songs from last run order; else selected roster
+    let tracks = null;
+    if (this.rateArchive?.length) {
+      // Rebuild unique list from archive order + any remaining unrated from rateTracks
+      const seen = new Set();
+      tracks = [];
+      for (const row of this.rateArchive) {
+        const t = slimSong(row.song);
+        if (t?.id && !seen.has(t.id)) {
+          seen.add(t.id);
+          tracks.push(t);
+        }
+      }
+      if (this.rateTracks) {
+        for (const t of this.rateTracks) {
+          const s = slimSong(t);
+          if (s?.id && !seen.has(s.id)) {
+            seen.add(s.id);
+            tracks.push(s);
+          }
+        }
+      }
+    }
+    if (!tracks?.length) {
+      tracks = this._rosterSelectedTracks();
+    }
+    if (!tracks?.length) {
+      const err = new Error('No songs to rematch.');
+      err.code = 'NO_PLAYLIST';
+      throw err;
+    }
+    // Temporarily ensure mode + selected set for startGroupRate
+    this.settings.gameMode = GAME_MODE.GROUP_RATE;
+    this.phase = PHASE.LOBBY;
+    this.locked = false;
+    this.clearGroupRateState();
+    this._rawTracks = tracks.map(slimSong).filter(Boolean);
+    this._selectedIds = new Set(this._rawTracks.map((t) => t.id));
+    this._syncPlaylistMetaCounts();
+    this.startGroupRate(playerId);
   }
 
   /**
@@ -553,6 +649,7 @@ export class Room {
     this.error = '';
     this.locked = true;
     this.paused = false;
+    this.lobbyReadyIds.clear();
     this.rateTracks = selected.map((t) => slimSong(t)).filter(Boolean);
     this.rateIndex = 0;
     this.rateRaterIds = new Set(raters.map((p) => p.id));
@@ -1179,10 +1276,12 @@ export class Room {
     );
     this.locked = true;
     this.paused = false;
+    this.lobbyReadyIds.clear();
     this.votes.clear();
     this.reveal = null;
     this.winnerBeat = null;
     this.error = '';
+    this.clearGroupRateState();
     this.beginMatchPhase();
     this.broadcast();
   }

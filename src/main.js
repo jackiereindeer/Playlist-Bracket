@@ -122,9 +122,131 @@ const SAVE_DEBOUNCE_MS = 350;
 const MAX_TRACK_VOLUMES = 200;
 
 const STORAGE_KEY = 'playlist-bracket-save-v1';
+const RATING_SAVE_KEY = 'playlist-bracket-rating-save-v1';
+const RATING_VOL_KEY = 'playlist-bracket-rating-vol-v1';
 /** Solo only: skip per-match “song won” full-screen beat (long playlists). */
 const SOLO_SKIP_WIN_BEAT_KEY = 'playlist-bracket-skip-win-beat-v1';
 const WIN_BEAT_MS = 4200;
+
+function hapticTap() {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      navigator.vibrate(12);
+    }
+  } catch {
+  }
+}
+
+/** Cold-start banner for free hosts (Render sleep). */
+function showColdStartBanner() {
+  let el = document.getElementById('cold-start-banner');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'cold-start-banner';
+    el.setAttribute('role', 'status');
+    el.innerHTML =
+      '<strong>Waking the server…</strong> Free hosts sleep when idle — this can take <strong>30–60 seconds</strong>. Please wait.';
+    document.body.appendChild(el);
+  }
+  el.hidden = false;
+  return el;
+}
+
+function hideColdStartBanner() {
+  const el = document.getElementById('cold-start-banner');
+  if (el) el.hidden = true;
+}
+
+async function waitForServerWarm() {
+  const banner = showColdStartBanner();
+  const started = Date.now();
+  let ok = false;
+  try {
+    for (let i = 0; i < 40; i++) {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 8000);
+        const res = await fetch('/api/health', {
+          signal: ctrl.signal,
+          cache: 'no-store',
+        });
+        clearTimeout(t);
+        if (res.ok) {
+          ok = true;
+          break;
+        }
+      } catch {
+        // keep waiting
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  } finally {
+    // Keep banner at least a moment if it was instant (local)
+    if (Date.now() - started < 400) {
+      // local/dev — hide immediately
+    }
+    if (ok) hideColdStartBanner();
+    else {
+      banner.innerHTML =
+        '<strong>Still waking…</strong> Refresh in a minute if this hangs. Free hosts can be slow.';
+      setTimeout(hideColdStartBanner, 8000);
+    }
+  }
+  return ok;
+}
+
+function saveRatingSession() {
+  try {
+    if (!ratingSession || ratingSession.finished) {
+      localStorage.removeItem(RATING_SAVE_KEY);
+      return;
+    }
+    localStorage.setItem(
+      RATING_SAVE_KEY,
+      JSON.stringify({
+        version: 1,
+        savedAt: Date.now(),
+        meta: ratingSession.meta,
+        index: ratingSession.index,
+        draft: ratingSession.draft,
+        entries: ratingSession.entries.map((e) => ({
+          song: e.song,
+          rating: e.rating,
+        })),
+      })
+    );
+  } catch {
+  }
+}
+
+function loadRatingSession() {
+  try {
+    const raw = localStorage.getItem(RATING_SAVE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (!data || data.version !== 1 || !Array.isArray(data.entries)) return null;
+    if (data.entries.length < 1) return null;
+    return {
+      meta: data.meta || { name: 'Rating session' },
+      entries: data.entries.map((e) => ({
+        song: e.song,
+        rating: e.rating == null ? null : Number(e.rating),
+      })),
+      index: Math.max(0, Math.min(data.index || 0, data.entries.length - 1)),
+      finished: false,
+      draft: data.draft == null ? null : Number(data.draft),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function clearRatingSave() {
+  try {
+    localStorage.removeItem(RATING_SAVE_KEY);
+  } catch {
+  }
+}
 
 function loadSkipWinBeatPref() {
   try {
@@ -1279,6 +1401,7 @@ function enterParty() {
 
 function clearRatingSession() {
   ratingSession = null;
+  clearRatingSave();
 }
 
 function renderHome() {
@@ -1302,6 +1425,14 @@ function renderHome() {
             <strong>Rating Mode</strong>
             <span>Rate each song 0–10 · ranked list at the end</span>
           </button>
+          ${
+            loadRatingSession()
+              ? `<button type="button" id="mode-rating-resume" class="home-mode-btn home-mode-rating">
+            <strong>Resume rating</strong>
+            <span>Continue your saved session</span>
+          </button>`
+              : ''
+          }
           <button type="button" id="mode-party" class="home-mode-btn home-mode-party">
             <strong>Play with friends</strong>
             <span>Host a room · share a code · vote together</span>
@@ -1313,6 +1444,15 @@ function renderHome() {
   document.getElementById('mode-solo')?.addEventListener('click', enterSolo);
   document.getElementById('mode-rating')?.addEventListener('click', enterRating);
   document.getElementById('mode-party')?.addEventListener('click', enterParty);
+  document.getElementById('mode-rating-resume')?.addEventListener('click', () => {
+    const saved = loadRatingSession();
+    if (!saved) return;
+    ratingSession = saved;
+    setupGameMode = 'rating';
+    uiMode = 'rating';
+    error = '';
+    render();
+  });
 }
 
 function render() {
@@ -1523,8 +1663,16 @@ function renderSetupRoster() {
       const art = song.image
         ? `<img class="roster-row-art" src="${escapeHtml(song.image)}" alt="" loading="lazy" />`
         : `<span class="roster-row-art roster-row-art-fallback" aria-hidden="true">♪</span>`;
+      const q = String(draft.search || '')
+        .toLowerCase()
+        .trim();
+      const hay = `${song.name || ''} ${song.artists || ''}`.toLowerCase();
+      if (q && !hay.includes(q)) return '';
       return `
-        <label class="roster-row ${on ? 'is-on' : 'is-off'}" data-track-id="${escapeHtml(song.id)}">
+        <label class="roster-row ${on ? 'is-on' : 'is-off'}" data-track-id="${escapeHtml(
+          song.id
+        )}" draggable="${busy ? 'false' : 'true'}">
+          <span class="roster-drag" aria-hidden="true" title="Drag to reorder">⠿</span>
           <input
             type="checkbox"
             class="roster-check"
@@ -1572,6 +1720,18 @@ function renderSetupRoster() {
           <button type="button" class="ghost small-btn" id="roster-none" ${busy ? 'disabled' : ''}>Select none</button>
           <button type="button" class="ghost small-btn" id="roster-reload" ${busy ? 'disabled' : ''}>Different playlist</button>
         </div>
+        <div class="field roster-search-field">
+          <label for="roster-search" class="visually-hidden">Search songs</label>
+          <input
+            id="roster-search"
+            type="search"
+            placeholder="Search songs or artists…"
+            autocomplete="off"
+            value="${escapeHtml(draft.search || '')}"
+            ${busy ? 'disabled' : ''}
+          />
+        </div>
+        <p class="setup-note muted small">Drag rows to reorder · uncheck to drop from the list</p>
 
         <div class="roster-list" id="roster-list" role="list">${rows}</div>
 
@@ -1687,6 +1847,65 @@ function wireSetupRoster() {
     updateRosterCountUi();
   });
 
+  // Search filter (re-render on input)
+  const search = document.getElementById('roster-search');
+  search?.addEventListener('input', () => {
+    if (!setupDraft) return;
+    setupDraft.search = search.value || '';
+    // Re-render list only — full render is fine for roster size
+    render();
+    const el = document.getElementById('roster-search');
+    if (el) {
+      el.focus();
+      try {
+        const len = el.value.length;
+        el.setSelectionRange(len, len);
+      } catch {
+      }
+    }
+  });
+
+  // Drag-reorder tracks
+  let dragId = null;
+  list?.addEventListener('dragstart', (e) => {
+    const row = e.target?.closest?.('.roster-row');
+    if (!row || !setupDraft) return;
+    dragId = row.getAttribute('data-track-id');
+    try {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', dragId || '');
+    } catch {
+    }
+    row.classList.add('is-dragging');
+  });
+  list?.addEventListener('dragend', (e) => {
+    e.target?.closest?.('.roster-row')?.classList.remove('is-dragging');
+    dragId = null;
+  });
+  list?.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    const row = e.target?.closest?.('.roster-row');
+    if (row) row.classList.add('is-drag-over');
+  });
+  list?.addEventListener('dragleave', (e) => {
+    e.target?.closest?.('.roster-row')?.classList.remove('is-drag-over');
+  });
+  list?.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const row = e.target?.closest?.('.roster-row');
+    row?.classList.remove('is-drag-over');
+    if (!setupDraft || !dragId || !row) return;
+    const targetId = row.getAttribute('data-track-id');
+    if (!targetId || targetId === dragId) return;
+    const from = setupDraft.tracks.findIndex((t) => t.id === dragId);
+    const to = setupDraft.tracks.findIndex((t) => t.id === targetId);
+    if (from < 0 || to < 0) return;
+    const [item] = setupDraft.tracks.splice(from, 1);
+    setupDraft.tracks.splice(to, 0, item);
+    dragId = null;
+    render();
+  });
+
   document.getElementById('roster-all')?.addEventListener('click', () => {
     if (!setupDraft) return;
     for (const s of setupDraft.tracks) setupDraft.selected.add(s.id);
@@ -1755,7 +1974,16 @@ async function onLoadPlaylist(e) {
     const res = await fetch(`/api/playlist?url=${encodeURIComponent(url)}`);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      throw new Error(data.error || `Failed to load (${res.status})`);
+      const code = data.code || '';
+      let msg = data.error || `Failed to load (${res.status})`;
+      if (code === 'YOUTUBE_API_KEY_MISSING' || /YOUTUBE_API_KEY/i.test(msg)) {
+        msg =
+          'YouTube needs a server API key (YOUTUBE_API_KEY). Ask the host to set it, or use a Spotify playlist.';
+      } else if (/private|not found|not shareable/i.test(msg)) {
+        msg =
+          'Couldn’t load that playlist. Make sure it’s public / shareable and the link is correct.';
+      }
+      throw new Error(msg);
     }
     if (myLoad !== loadGeneration) return;
 
@@ -1790,6 +2018,7 @@ async function onLoadPlaylist(e) {
       seeding: 'order',
       loadUrl: url,
       addUrl: '',
+      search: '',
       busy: '',
       note:
         unique.length === 1
@@ -1979,8 +2208,15 @@ function onStartFromDraft() {
       if (meta.source === 'youtube' || tracks.some(isYouTubeTrack)) {
         loadYouTubeApi().catch(() => {});
       }
+      // Restore volume preference for rating mode
+      try {
+        const v = Number(localStorage.getItem(RATING_VOL_KEY));
+        if (Number.isFinite(v)) volumeBySide.a = Math.min(1, Math.max(0, v));
+      } catch {
+      }
       clearSetupDraft();
       error = '';
+      saveRatingSession();
     } else {
       clearRatingSession();
       // tracks may already be shuffled above; pass 'order' so createTournament keeps that list
@@ -2168,6 +2404,9 @@ function renderRatingSong(gen) {
           <button type="button" class="ghost" id="rating-back" ${idx === 0 ? 'disabled' : ''}>
             Back
           </button>
+          <button type="button" class="ghost" id="rating-skip" title="Move to end of queue">
+            Skip for later
+          </button>
           <button type="button" id="rating-next" ${hasPick ? '' : 'disabled'}>
             ${isLast ? 'Finish' : 'Next song'}
           </button>
@@ -2226,6 +2465,10 @@ function wireRatingSong(gen, song, yt) {
     }
     setYouTubeVolume('rating', vol);
     if (song?.id) rememberTrackVolume(song.id, vol);
+    try {
+      localStorage.setItem(RATING_VOL_KEY, String(vol));
+    } catch {
+    }
   });
 
   document.getElementById('rating-back')?.addEventListener('click', () => {
@@ -2239,6 +2482,25 @@ function wireRatingSong(gen, song, yt) {
     const prev = ratingSession.entries[ratingSession.index];
     ratingSession.draft =
       prev?.rating != null ? clampRating(prev.rating) : null;
+    saveRatingSession();
+    render();
+  });
+
+  document.getElementById('rating-skip')?.addEventListener('click', () => {
+    if (!ratingSession || ratingSession.finished) return;
+    const i = ratingSession.index;
+    if (i < 0 || i >= ratingSession.entries.length) return;
+    // Move current song to end of queue (rate later)
+    const [entry] = ratingSession.entries.splice(i, 1);
+    entry.rating = null;
+    ratingSession.entries.push(entry);
+    // Stay at same index (now the next song); if was last, wrap behavior: stay if more remain
+    if (ratingSession.index >= ratingSession.entries.length) {
+      ratingSession.index = Math.max(0, ratingSession.entries.length - 1);
+    }
+    ratingSession.draft = null;
+    disposeMedia({ removeTransition: true });
+    saveRatingSession();
     render();
   });
 
@@ -2246,24 +2508,31 @@ function wireRatingSong(gen, song, yt) {
     if (!ratingSession) return;
     const d = ratingDraftValue();
     if (d == null) return;
+    hapticTap();
     const cur = ratingSession.entries[ratingSession.index];
     if (cur) cur.rating = d;
     disposeMedia({ removeTransition: true });
     if (ratingSession.index >= ratingSession.entries.length - 1) {
       ratingSession.finished = true;
       ratingSession.index = ratingSession.entries.length;
+      clearRatingSave();
     } else {
       ratingSession.index += 1;
       const next = ratingSession.entries[ratingSession.index];
       ratingSession.draft =
         next?.rating != null ? clampRating(next.rating) : null;
+      saveRatingSession();
     }
     render();
   });
 
   document.getElementById('rating-quit')?.addEventListener('click', () => {
     disposeMedia({ removeTransition: true });
-    clearRatingSession();
+    // Persist mid-session so home can offer “Resume rating”
+    if (ratingSession && !ratingSession.finished) {
+      saveRatingSession();
+    }
+    ratingSession = null;
     clearSetupDraft();
     error = '';
     uiMode = 'home';
@@ -2417,11 +2686,40 @@ function renderRatingResults(gen) {
         ${cards || '<p class="muted">No ratings.</p>'}
       </div>
       <div class="form-actions rating-results-actions">
+        <button type="button" class="ghost" id="rating-export">Copy results</button>
         <button type="button" id="rating-again">Rate again</button>
         <button type="button" class="ghost" id="rating-home">Back to menu</button>
       </div>
     </div>
   `;
+
+  document.getElementById('rating-export')?.addEventListener('click', async () => {
+    const lines = [
+      `Rating Mode — ${name}`,
+      `Average: ${formatRating(avg)}`,
+      '',
+      ...ranked.map(
+        (e, i) =>
+          `${i + 1}. ${e.song.name || '?'} — ${formatRating(e.rating)}${
+            e.song.artists ? ` (${e.song.artists})` : ''
+          }`
+      ),
+    ];
+    const text = lines.join('\n');
+    const btn = document.getElementById('rating-export');
+    try {
+      await navigator.clipboard.writeText(text);
+      if (btn) {
+        const prev = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(() => {
+          if (btn.isConnected) btn.textContent = prev;
+        }, 1500);
+      }
+    } catch {
+      if (btn) btn.textContent = 'Copy failed';
+    }
+  });
 
   document.getElementById('rating-again')?.addEventListener('click', () => {
     disposeMedia({ removeTransition: true });
@@ -2434,6 +2732,7 @@ function renderRatingResults(gen) {
       ratingSession.index = 0;
       ratingSession.finished = false;
       ratingSession.draft = null;
+      saveRatingSession();
     }
     render();
   });
@@ -3906,6 +4205,47 @@ function onMatchKeydown(e) {
 
   const key = e.key;
 
+  // Space = play/pause (solo match / rating)
+  if (key === ' ' || e.code === 'Space') {
+    if (uiMode === 'rating' && ratingSession && !ratingSession.finished) {
+      e.preventDefault();
+      document.getElementById('rating-play')?.click();
+      return;
+    }
+    if (state && !state.finished && currentMatch(state) && !roundTransition && !matchWinBeat) {
+      e.preventDefault();
+      const playing = document.getElementById('audio-a');
+      const b = document.getElementById('audio-b');
+      if (playing && !playing.paused) document.getElementById('play-a')?.click();
+      else if (b && !b.paused) document.getElementById('play-b')?.click();
+      else document.getElementById('play-a')?.click();
+      return;
+    }
+  }
+
+  // Rating Mode: 0–9 pick score
+  if (uiMode === 'rating' && ratingSession && !ratingSession.finished) {
+    if (key >= '0' && key <= '9') {
+      e.preventDefault();
+      let n = Number(key);
+      if (key === '0' && e.shiftKey) n = 10;
+      setRatingDraft(n);
+      hapticTap();
+      return;
+    }
+    if (key === 'Enter') {
+      e.preventDefault();
+      document.getElementById('rating-next')?.click();
+      return;
+    }
+    if (key === 's' || key === 'S') {
+      e.preventDefault();
+      document.getElementById('rating-skip')?.click();
+      return;
+    }
+    return;
+  }
+
   // Undo: U (also works on results / during transition if stack has entries)
   if (key === 'u' || key === 'U') {
     if (!undoStack.length) return;
@@ -3974,20 +4314,22 @@ window.addEventListener('keydown', onMatchKeydown);
 // Idle baseline wave; becomes a real scope when a preview plays
 startScope();
 
-// Share link ?room=CODE → open party join (don't drop into a restored solo game)
-if (linkRoom.length === 6) {
-  // Keep any solo save on disk; just don't enter solo UI this load
-  state = null;
-  roundTransition = null;
-  matchWinBeat = null;
-  clearUndoStack();
-  enterParty();
-} else {
-  if (restored) {
-    state = restored;
+// Warm free-tier hosts; show “please wait” if cold
+waitForServerWarm().finally(() => {
+  // Share link ?room=CODE → open party join (don't drop into a restored solo game)
+  if (linkRoom.length === 6) {
+    state = null;
     roundTransition = null;
-    uiMode = 'solo';
+    matchWinBeat = null;
     clearUndoStack();
+    enterParty();
+  } else {
+    if (restored) {
+      state = restored;
+      roundTransition = null;
+      uiMode = 'solo';
+      clearUndoStack();
+    }
+    render();
   }
-  render();
-}
+});
