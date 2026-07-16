@@ -62,10 +62,6 @@ export function roundLabel(remainingCount, initialCount = null) {
   return `${n} songs left`;
 }
 
-export function regionRoundLabel(songCount, initialCount = null) {
-  return roundLabel(songCount, initialCount);
-}
-
 export function splitRegions(songs) {
   const mid = Math.ceil(songs.length / 2);
   return {
@@ -141,13 +137,6 @@ function flattenMatches(left, right, finalMatch, crossMatch) {
   return list;
 }
 
-function totalRemaining(left, right, finalMatch) {
-  if (finalMatch) return 2;
-  const l = left.champion ? 1 : left.songs?.length || 0;
-  const r = right.champion ? 1 : right.songs?.length || 0;
-  return l + r;
-}
-
 function regionFromAdvancers(region, advancers, byeCounts) {
   if (advancers.length <= 1) {
     return {
@@ -172,17 +161,18 @@ function regionFromAdvancers(region, advancers, byeCounts) {
   };
 }
 
-function collectAdvancers(regionState, crossWinner, preferLeftForCross) {
-  let list = regionState.champion
-    ? [regionState.champion]
-    : regionState.bye
-      ? [...regionState.winners, regionState.bye]
-      : [...(regionState.winners || [])];
-  return list;
+function collectAdvancers(regionState) {
+  if (regionState.champion) return [regionState.champion];
+  if (regionState.bye) return [...(regionState.winners || []), regionState.bye];
+  return [...(regionState.winners || [])];
 }
 
 export function createTournament(playlist, tracks, seeding) {
-  const ordered = seeding === 'shuffle' ? shuffle(tracks) : [...tracks];
+  const list = Array.isArray(tracks) ? tracks.filter((t) => t && t.id) : [];
+  if (list.length < 2) {
+    throw new Error('Need at least 2 playable songs in the playlist to run a tournament.');
+  }
+  const ordered = seeding === 'shuffle' ? shuffle(list) : [...list];
   const { left: leftSongs, right: rightSongs } = splitRegions(ordered);
 
   let byeCounts = new Map();
@@ -413,15 +403,27 @@ function advanceRegions(state) {
 }
 
 export function pickWinner(state, side) {
-  if (state.finished || state.matchIndex >= state.matches.length) return state;
+  if (!state || state.finished) return state;
+  if (!Array.isArray(state.matches) || state.matchIndex >= state.matches.length) {
+    return state;
+  }
+  if (side !== 'a' && side !== 'b') return state;
 
   const match = state.matches[state.matchIndex];
+  if (!match?.a?.id || !match?.b?.id) return state;
+
   const winner = side === 'a' ? match.a : match.b;
   const loser = side === 'a' ? match.b : match.a;
   const region = match.region || 'left';
 
-  let left = { ...state.left, winners: [...(state.left.winners || [])] };
-  let right = { ...state.right, winners: [...(state.right.winners || [])] };
+  let left = {
+    ...state.left,
+    winners: [...(state.left?.winners || [])],
+  };
+  let right = {
+    ...state.right,
+    winners: [...(state.right?.winners || [])],
+  };
   let crossWinner = state.crossWinner || null;
 
   if (region === 'left') {
@@ -433,7 +435,7 @@ export function pickWinner(state, side) {
   }
 
   const history = [
-    ...state.history,
+    ...(state.history || []),
     {
       round: state.roundNumber,
       matchIndex: state.matchIndex,
@@ -452,8 +454,8 @@ export function pickWinner(state, side) {
     crossWinner,
     history,
     matchIndex: state.matchIndex + 1,
-    // Whole tournament songs still alive (each match eliminates one)
-    remaining: Math.max(1, state.initialCount - history.length),
+    // Songs still alive = field size minus one elimination per completed match
+    remaining: Math.max(1, (state.initialCount || history.length + 1) - history.length),
   };
 
   if (region === 'final') {
@@ -479,32 +481,37 @@ export function pickWinner(state, side) {
 }
 
 export function currentMatch(state) {
-  if (state.finished || state.matchIndex >= state.matches.length) return null;
-  return state.matches[state.matchIndex];
+  if (!state || state.finished) return null;
+  if (!Array.isArray(state.matches) || state.matchIndex >= state.matches.length) {
+    return null;
+  }
+  const match = state.matches[state.matchIndex];
+  if (!match?.a?.id || !match?.b?.id) return null;
+  return match;
 }
 
 export function progress(state) {
-  const totalMatchesThisWave = state.matches.length;
-  const doneThisWave = state.matchIndex;
-  const totalSongs = state.initialCount;
+  const totalMatchesThisWave = Array.isArray(state?.matches) ? state.matches.length : 0;
+  const doneThisWave = state?.matchIndex || 0;
+  const totalSongs = state?.initialCount || 0;
   const approxTotalMatches = Math.max(1, totalSongs - 1);
-  const completedHistory = state.history.length;
+  const completedHistory = Array.isArray(state?.history) ? state.history.length : 0;
 
   const match = currentMatch(state);
   const region = match?.region;
 
   // Always label from total songs left in the whole tournament (not one half)
   let label = 'Final';
-  if (region === 'final' || state.remaining === 2) {
+  if (region === 'final' || state?.remaining === 2) {
     label = 'Final';
   } else {
-    label = roundLabel(state.remaining, state.initialCount);
+    label = roundLabel(state?.remaining, state?.initialCount);
   }
 
   return {
-    roundNumber: state.roundNumber,
+    roundNumber: state?.roundNumber || 1,
     roundLabel: label,
-    remaining: state.remaining,
+    remaining: state?.remaining ?? totalSongs,
     matchInRound: totalMatchesThisWave ? doneThisWave + 1 : 0,
     matchesInRound: totalMatchesThisWave,
     completedMatches: completedHistory,

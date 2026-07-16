@@ -5,23 +5,35 @@ import {
   currentMatch,
   progress,
 } from './tournament.js';
+import {
+  prepareMediaElement,
+  connectMediaElement,
+  kickScopeFromPlayback,
+  startScope,
+  onMediaDisposed,
+} from './scope.js';
 
 const app = document.querySelector('#app');
 
 let state = null;
 let loading = false;
 let error = '';
-let shareMsg = '';
-
 let roundTransition = null;
 let transitionTimer = null;
+let saveTimer = null;
+
+/** In-flight champion bed load so we never double-set src (which restarts audio). */
+let championBedLoad = null; // { id, promise }
 
 let volumeBySide = { a: 0.25, b: 0.25 };
 
 /** Last volume the user set for each track id (0–1). */
 const volumeByTrackId = Object.create(null);
 
+/** Resolved preview URLs by track id. */
 const previewCache = Object.create(null);
+/** In-flight preview fetches so concurrent callers share one request. */
+const previewInflight = Object.create(null);
 
 let renderGeneration = 0;
 let loadGeneration = 0;
@@ -32,8 +44,19 @@ let transitionSongIndex = 0;
 
 const DEFAULT_MATCH_VOLUME = 0.25;
 const DEFAULT_TRANSITION_VOLUME = 0.1;
+const SAVE_DEBOUNCE_MS = 350;
+const MAX_CACHED_PREVIEWS = 400;
+const MAX_TRACK_VOLUMES = 800;
 
 const STORAGE_KEY = 'playlist-bracket-save-v1';
+
+function isSongLike(s) {
+  return s && typeof s === 'object' && typeof s.id === 'string' && s.id.length > 0;
+}
+
+function isMatchLike(m) {
+  return m && typeof m === 'object' && isSongLike(m.a) && isSongLike(m.b);
+}
 
 function serializeState(s) {
   if (!s) return null;
@@ -51,28 +74,46 @@ function serializeState(s) {
     byeCounts,
     left: s.left,
     right: s.right,
-    finalMatch: s.finalMatch,
+    finalMatch: s.finalMatch || null,
+    crossMatch: s.crossMatch || null,
+    crossWinner: s.crossWinner || null,
     matches: s.matches,
     matchIndex: s.matchIndex,
     roundNumber: s.roundNumber,
     remaining: s.remaining,
-    bye: s.bye,
+    bye: s.bye || null,
     winners: s.winners,
-    champion: s.champion,
+    champion: s.champion || null,
     finished: s.finished,
   };
 }
 
 function deserializeState(data) {
   if (!data || typeof data !== 'object') return null;
-  if (!data.playlist || !data.left || !data.right) return null;
-  if (!Array.isArray(data.history) || !Array.isArray(data.matches)) return null;
-  if (typeof data.matchIndex !== 'number' || typeof data.roundNumber !== 'number') {
+  if (!data.playlist || typeof data.playlist !== 'object') return null;
+  if (!data.left || !data.right || typeof data.left !== 'object' || typeof data.right !== 'object') {
     return null;
+  }
+  if (!Array.isArray(data.history) || !Array.isArray(data.matches)) return null;
+  if (!Number.isFinite(data.matchIndex) || !Number.isFinite(data.roundNumber)) {
+    return null;
+  }
+  if (!Number.isFinite(data.initialCount) || data.initialCount < 2) return null;
+
+  const finished = Boolean(data.finished);
+  if (finished) {
+    if (!isSongLike(data.champion)) return null;
+  } else {
+    // Must have a playable current match — index past end / empty queue is corrupt
+    if (data.matches.length === 0) return null;
+    if (data.matchIndex < 0 || data.matchIndex >= data.matches.length) return null;
+    for (const m of data.matches) {
+      if (!isMatchLike(m)) return null;
+    }
   }
 
   const byeEntries = Object.entries(data.byeCounts || {}).map(([k, v]) => [
-    k,
+    String(k),
     Number(v) || 0,
   ]);
 
@@ -80,11 +121,20 @@ function deserializeState(data) {
     ...data,
     byeCounts: new Map(byeEntries),
     winners: Array.isArray(data.winners) ? data.winners : [],
-    finished: Boolean(data.finished),
+    crossMatch: data.crossMatch && isMatchLike(data.crossMatch) ? data.crossMatch : null,
+    crossWinner: isSongLike(data.crossWinner) ? data.crossWinner : null,
+    finalMatch: data.finalMatch && isMatchLike(data.finalMatch) ? data.finalMatch : null,
+    champion: isSongLike(data.champion) ? data.champion : null,
+    matchIndex: Math.max(0, Math.floor(data.matchIndex)),
+    roundNumber: Math.max(1, Math.floor(data.roundNumber)),
+    remaining: Number.isFinite(data.remaining)
+      ? Math.max(1, Math.floor(data.remaining))
+      : Math.max(1, data.initialCount - data.history.length),
+    finished,
   };
 }
 
-function saveProgress() {
+function saveProgressNow() {
   try {
     if (!state) {
       localStorage.removeItem(STORAGE_KEY);
@@ -101,10 +151,53 @@ function saveProgress() {
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   } catch {
+    // Quota or private mode — drop oldest track volumes and retry once
+    try {
+      const ids = Object.keys(volumeByTrackId);
+      if (ids.length > 50) {
+        for (const id of ids.slice(0, Math.floor(ids.length / 2))) {
+          delete volumeByTrackId[id];
+        }
+        if (state) {
+          localStorage.setItem(
+            STORAGE_KEY,
+            JSON.stringify({
+              version: 1,
+              savedAt: Date.now(),
+              state: serializeState(state),
+              volumeBySide: { ...volumeBySide },
+              volumeByTrackId: { ...volumeByTrackId },
+              playlistTracks,
+              transitionSongIndex,
+            })
+          );
+        }
+      }
+    } catch {
+    }
   }
 }
 
+function saveProgress({ immediate = false } = {}) {
+  if (saveTimer != null) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  if (immediate) {
+    saveProgressNow();
+    return;
+  }
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveProgressNow();
+  }, SAVE_DEBOUNCE_MS);
+}
+
 function clearSavedProgress() {
+  if (saveTimer != null) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
   try {
     localStorage.removeItem(STORAGE_KEY);
   } catch {
@@ -115,6 +208,12 @@ function rememberTrackVolume(trackId, volume01) {
   if (!trackId) return;
   const vol = Math.min(1, Math.max(0, volume01));
   volumeByTrackId[trackId] = vol;
+  const keys = Object.keys(volumeByTrackId);
+  if (keys.length > MAX_TRACK_VOLUMES) {
+    for (const id of keys.slice(0, keys.length - MAX_TRACK_VOLUMES)) {
+      delete volumeByTrackId[id];
+    }
+  }
 }
 
 function volumeForTrack(trackId, fallback = DEFAULT_TRANSITION_VOLUME) {
@@ -152,15 +251,19 @@ function loadProgress() {
     }
     if (payload.volumeByTrackId && typeof payload.volumeByTrackId === 'object') {
       clearTrackVolumes();
+      let count = 0;
       for (const [id, v] of Object.entries(payload.volumeByTrackId)) {
-        if (typeof v === 'number') volumeByTrackId[id] = Math.min(1, Math.max(0, v));
+        if (typeof v !== 'number' || !id) continue;
+        volumeByTrackId[id] = Math.min(1, Math.max(0, v));
+        count += 1;
+        if (count >= MAX_TRACK_VOLUMES) break;
       }
     }
     if (Array.isArray(payload.playlistTracks)) {
-      playlistTracks = payload.playlistTracks;
+      playlistTracks = payload.playlistTracks.filter(isSongLike);
     }
-    if (typeof payload.transitionSongIndex === 'number') {
-      transitionSongIndex = Math.max(0, payload.transitionSongIndex);
+    if (typeof payload.transitionSongIndex === 'number' && Number.isFinite(payload.transitionSongIndex)) {
+      transitionSongIndex = Math.max(0, Math.floor(payload.transitionSongIndex));
     }
     return restored;
   } catch {
@@ -221,28 +324,179 @@ function clearPreviewCache() {
   for (const key of Object.keys(previewCache)) {
     delete previewCache[key];
   }
+  for (const key of Object.keys(previewInflight)) {
+    delete previewInflight[key];
+  }
 }
 
-function disposeMedia() {
+function hardStopAudio(audio) {
+  if (!audio) return;
+  try {
+    audio.pause();
+    audio.onended = null;
+    audio.onerror = null;
+    audio.oncanplay = null;
+    audio.ontimeupdate = null;
+    audio.onplay = null;
+    audio.onpause = null;
+    audio.removeAttribute('src');
+    // Empty source + load aborts network and frees the buffer
+    audio.load();
+  } catch {
+  }
+}
+
+function disposeMedia({ removeTransition = false } = {}) {
   for (const side of ['a', 'b', 'champion', 'transition']) {
     const audio = document.getElementById(`audio-${side}`);
     if (!audio) continue;
-    try {
-      audio.pause();
-      audio.onended = null;
-      audio.onerror = null;
-      audio.removeAttribute('src');
-      audio.load();
-    } catch {
+    hardStopAudio(audio);
+    if (side === 'transition' && removeTransition && audio.parentNode) {
+      try {
+        audio.parentNode.removeChild(audio);
+      } catch {
+      }
     }
   }
+  onMediaDisposed();
+}
+
+/** Persistent champion player — lives outside #app so re-renders don't kill it. */
+function getChampionBed() {
+  let audio = document.getElementById('audio-champion-bed');
+  if (!audio) {
+    audio = document.createElement('audio');
+    audio.id = 'audio-champion-bed';
+    audio.setAttribute('playsinline', '');
+    audio.preload = 'auto';
+    audio.loop = true;
+    document.body.appendChild(audio);
+  }
+  return audio;
+}
+
+function championBedIsFor(songId) {
+  const audio = document.getElementById('audio-champion-bed');
+  return Boolean(audio && songId && audio.dataset.trackId === songId && audio.currentSrc);
+}
+
+function championBedIsPlaying(songId) {
+  const audio = document.getElementById('audio-champion-bed');
+  return Boolean(
+    audio &&
+      songId &&
+      audio.dataset.trackId === songId &&
+      audio.currentSrc &&
+      !audio.paused &&
+      !audio.ended
+  );
+}
+
+function stopChampionBed() {
+  championBedLoad = null;
+  const audio = document.getElementById('audio-champion-bed');
+  if (!audio) return;
+  try {
+    audio.pause();
+    audio.onended = null;
+    audio.onerror = null;
+    audio.onplay = null;
+    audio.onpause = null;
+    delete audio.dataset.trackId;
+    audio.removeAttribute('src');
+    audio.load();
+  } catch {
+  }
+}
+
+/**
+ * Start champion audio once and never restart it for the same track.
+ * Re-renders / results handoff only adjust volume — they never touch src.
+ */
+function playChampionBed(song, volume01 = DEFAULT_TRANSITION_VOLUME, { resumeIfPaused = true } = {}) {
+  if (!isSongLike(song)) return Promise.resolve(null);
+
+  const vol = volumeForTrack(song.id, volume01);
+  rememberTrackVolume(song.id, vol);
+  const audio = getChampionBed();
+  audio.loop = true;
+  // Volume-only touch — never resets playback position
+  audio.volume = vol;
+
+  // Already loaded this track: do not set src again (that restarts from 0)
+  if (championBedIsFor(song.id)) {
+    if (resumeIfPaused && audio.paused) {
+      return audio
+        .play()
+        .then(() => {
+          kickScopeFromPlayback();
+          return audio;
+        })
+        .catch(() => audio);
+    }
+    kickScopeFromPlayback();
+    return Promise.resolve(audio);
+  }
+
+  // Share one in-flight load so reveal + results never double-assign src
+  if (championBedLoad?.id === song.id) {
+    return championBedLoad.promise.then((el) => {
+      if (el) el.volume = vol;
+      return el;
+    });
+  }
+
+  // Reserve the track id immediately so concurrent callers see "in progress"
+  audio.dataset.trackId = song.id;
+
+  const promise = ensurePreviewUrl(song.id)
+    .then((url) => {
+      if (!url) {
+        delete audio.dataset.trackId;
+        return null;
+      }
+      // Quit/start-over may have cleared the bed mid-fetch
+      if (audio.dataset.trackId !== song.id) return null;
+
+      // Another completion already armed this element
+      if (audio.currentSrc && audio.dataset.trackId === song.id) {
+        audio.volume = vol;
+        if (resumeIfPaused && audio.paused) {
+          return audio.play().then(() => {
+            kickScopeFromPlayback();
+            return audio;
+          });
+        }
+        return audio;
+      }
+
+      prepareMediaElement(audio);
+      audio.loop = true;
+      audio.volume = vol;
+      audio.src = url;
+      connectMediaElement(audio);
+      return audio.play().then(() => {
+        kickScopeFromPlayback();
+        return audio;
+      });
+    })
+    .catch(() => {
+      if (audio.dataset.trackId === song.id) delete audio.dataset.trackId;
+      return null;
+    })
+    .finally(() => {
+      if (championBedLoad?.id === song.id) championBedLoad = null;
+    });
+
+  championBedLoad = { id: song.id, promise };
+  return promise;
 }
 
 function takeNextTransitionSong() {
   if (!playlistTracks.length) return null;
   const song = playlistTracks[transitionSongIndex % playlistTracks.length];
   transitionSongIndex += 1;
-  saveProgress();
+  saveProgress({ immediate: true });
   return song;
 }
 
@@ -256,13 +510,18 @@ function playAutoPreview(song, volume, gen) {
       audio = document.createElement('audio');
       audio.id = 'audio-transition';
       audio.setAttribute('playsinline', '');
+      audio.preload = 'auto';
       document.body.appendChild(audio);
     }
     try {
-      audio.pause();
+      hardStopAudio(audio);
+      prepareMediaElement(audio);
       audio.volume = vol;
       audio.src = url;
-      audio.play().catch(() => {});
+      connectMediaElement(audio);
+      audio.play()
+        .then(() => kickScopeFromPlayback())
+        .catch(() => {});
     } catch {
     }
   });
@@ -271,19 +530,60 @@ function playAutoPreview(song, volume, gen) {
 function scheduleTransition(payload, ms) {
   clearTransitionTimer();
   roundTransition = payload;
+  const isChampionReveal = Boolean(payload.champion);
   render();
   const gen = renderGeneration;
-  const song = payload.champion || payload.transitionSong;
-  if (song) playAutoPreview(song, DEFAULT_TRANSITION_VOLUME, gen);
+  if (isChampionReveal) {
+    // Start once here; results handoff must not restart this element
+    playChampionBed(
+      payload.champion,
+      volumeForTrack(payload.champion.id, DEFAULT_TRANSITION_VOLUME),
+      { resumeIfPaused: true }
+    );
+  } else if (payload.transitionSong) {
+    playAutoPreview(payload.transitionSong, DEFAULT_TRANSITION_VOLUME, gen);
+  }
   transitionTimer = setTimeout(() => {
     transitionTimer = null;
+    const keepChampion = Boolean(roundTransition?.champion);
     roundTransition = null;
+    if (keepChampion) {
+      // Match/stinger only — champion bed keeps running into results with no gap
+      silenceMatchPlayers({ removeTransition: true });
+    } else {
+      disposeMedia({ removeTransition: true });
+    }
     render();
   }, ms);
 }
 
+function silenceMatchPlayers({ removeTransition = false } = {}) {
+  for (const side of ['a', 'b', 'champion', 'transition']) {
+    const el = document.getElementById(`audio-${side}`);
+    if (!el) continue;
+    hardStopAudio(el);
+    if (side === 'transition' && removeTransition && el.parentNode) {
+      try {
+        el.parentNode.removeChild(el);
+      } catch {
+      }
+    }
+  }
+}
+
 function render() {
-  disposeMedia();
+  const keepTransition = Boolean(roundTransition);
+  const keepChampionBed =
+    Boolean(roundTransition?.champion) ||
+    Boolean(state?.finished && isSongLike(state?.champion));
+
+  if (keepChampionBed) {
+    // Stop match/stinger players only — champion bed must keep playing straight through
+    silenceMatchPlayers({ removeTransition: !keepTransition });
+  } else {
+    disposeMedia({ removeTransition: !keepTransition });
+  }
+
   renderGeneration += 1;
   const gen = renderGeneration;
   document.body.classList.remove('on-setup');
@@ -304,12 +604,29 @@ function render() {
   }
 
   if (state?.finished) {
+    if (!isSongLike(state.champion)) {
+      // Corrupt finished save — bail to setup rather than crash
+      state = null;
+      clearSavedProgress();
+      clearStageVibe();
+      renderSetup();
+      return;
+    }
     applyStageVibe(1);
     renderResults(gen);
     return;
   }
 
   if (state) {
+    // Recover stuck mid-wave queues (empty matches / index past end)
+    if (!Array.isArray(state.matches) || state.matchIndex >= state.matches.length) {
+      state = null;
+      clearSavedProgress();
+      error = 'Saved progress looked stuck — start a new tournament.';
+      clearStageVibe();
+      renderSetup();
+      return;
+    }
     applyStageVibe(state.remaining);
     renderMatch(gen);
     return;
@@ -389,7 +706,7 @@ function renderSetup() {
     </div>
   `;
 
-  document.getElementById('setup-form').addEventListener('submit', onStart);
+  document.getElementById('setup-form')?.addEventListener('submit', onStart);
 }
 
 function renderRoundTransition() {
@@ -436,19 +753,22 @@ function renderRoundTransition() {
 
 function renderMatch(gen) {
   const match = currentMatch(state);
+  if (!match || !isSongLike(match.a) || !isSongLike(match.b)) {
+    state = null;
+    clearSavedProgress();
+    error = 'Could not restore that match — start a new tournament.';
+    renderSetup();
+    return;
+  }
+
   const p = progress(state);
   const roundDone = Math.max(0, p.matchInRound - 1);
   const roundTotal = Math.max(1, p.matchesInRound);
   const pct = Math.min(100, Math.round((roundDone / roundTotal) * 100));
   const matchesLeft = Math.max(0, p.matchesInRound - roundDone);
 
-  if (!match) {
-    app.innerHTML = `<div class="card loading"><div class="spinner"></div> Advancing…</div>`;
-    return;
-  }
-
   app.innerHTML = `
-    ${brandHeaderHtml(state.playlist.name)}
+    ${brandHeaderHtml(state.playlist?.name || 'Playlist')}
 
     <div class="progress-bar-wrap">
       <div class="progress-meta">
@@ -472,9 +792,9 @@ function renderMatch(gen) {
     </div>
   `;
 
-  document.getElementById('pick-a').addEventListener('click', () => onPick('a'));
-  document.getElementById('pick-b').addEventListener('click', () => onPick('b'));
-  document.getElementById('quit-btn').addEventListener('click', onQuit);
+  document.getElementById('pick-a')?.addEventListener('click', () => onPick('a'));
+  document.getElementById('pick-b')?.addEventListener('click', () => onPick('b'));
+  document.getElementById('quit-btn')?.addEventListener('click', onQuit);
   wireSongPlayers(match.a, match.b, gen);
 }
 
@@ -542,25 +862,43 @@ function songCardHtml(song, side) {
   `;
 }
 
-async function ensurePreviewUrl(trackId) {
-  if (previewCache[trackId]) return previewCache[trackId];
-
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      if (attempt > 0) {
-        await new Promise((r) => setTimeout(r, 400));
-      }
-      const res = await fetch(`/api/preview/${encodeURIComponent(trackId)}`);
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.previewUrl) {
-        previewCache[trackId] = data.previewUrl;
-        return data.previewUrl;
-      }
-    } catch {
-    }
+function trimPreviewCache() {
+  const keys = Object.keys(previewCache);
+  if (keys.length <= MAX_CACHED_PREVIEWS) return;
+  for (const id of keys.slice(0, keys.length - MAX_CACHED_PREVIEWS)) {
+    delete previewCache[id];
   }
+}
 
-  return null;
+async function ensurePreviewUrl(trackId) {
+  if (!trackId) return null;
+  if (previewCache[trackId]) return previewCache[trackId];
+  if (previewInflight[trackId]) return previewInflight[trackId];
+
+  previewInflight[trackId] = (async () => {
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          if (attempt > 0) {
+            await new Promise((r) => setTimeout(r, 400));
+          }
+          const res = await fetch(`/api/preview/${encodeURIComponent(trackId)}`);
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && data.previewUrl) {
+            previewCache[trackId] = data.previewUrl;
+            trimPreviewCache();
+            return data.previewUrl;
+          }
+        } catch {
+        }
+      }
+      return null;
+    } finally {
+      delete previewInflight[trackId];
+    }
+  })();
+
+  return previewInflight[trackId];
 }
 
 function setSideVolume(side, volume01, trackId = null) {
@@ -572,6 +910,7 @@ function setSideVolume(side, volume01, trackId = null) {
   if (label) label.textContent = `${pct}%`;
   const audio = document.getElementById(`audio-${side}`);
   if (audio) audio.volume = vol;
+  saveProgress();
 }
 
 function setPlayingUi(side, playing) {
@@ -585,18 +924,21 @@ function stillCurrent(gen, el) {
   return gen === renderGeneration && el != null && el.isConnected;
 }
 
-function wireOnePlayer(side, song, volumeKey, gen) {
+function wireOnePlayer(side, song, volumeKey, gen, options = {}) {
+  const { autoplay = false } = options;
   const audio = document.getElementById(`audio-${side}`);
   const playBtn = document.getElementById(`play-${side}`);
   const status = document.getElementById(`status-${side}`);
   const slider = document.getElementById(`vol-${side}`);
-  if (!audio || !playBtn) return;
+  if (!audio || !playBtn || !isSongLike(song)) return;
 
   const initialVol = volumeForTrack(
     song.id,
-    volumeBySide[volumeKey] ?? DEFAULT_MATCH_VOLUME
+    side === 'champion'
+      ? DEFAULT_TRANSITION_VOLUME
+      : volumeBySide[volumeKey] ?? DEFAULT_MATCH_VOLUME
   );
-  volumeBySide[volumeKey] = initialVol;
+  if (side === 'a' || side === 'b') volumeBySide[volumeKey] = initialVol;
   audio.volume = initialVol;
   if (slider) {
     slider.value = String(Math.round(initialVol * 100));
@@ -613,6 +955,7 @@ function wireOnePlayer(side, song, volumeKey, gen) {
         audio.volume = vol;
         const label = document.getElementById('vol-pct-champion');
         if (label) label.textContent = `${slider.value}%`;
+        saveProgress();
       } else {
         setSideVolume(volumeKey, vol, song.id);
       }
@@ -643,6 +986,7 @@ function wireOnePlayer(side, song, volumeKey, gen) {
           status.textContent = 'Loading preview…';
         }
         delete previewCache[song.id];
+        delete previewInflight[song.id];
         ensurePreviewUrl(song.id).then((retryUrl) => {
           if (!stillCurrent(gen, playBtn) || !stillCurrent(gen, audio)) return;
           if (!retryUrl) {
@@ -662,14 +1006,59 @@ function wireOnePlayer(side, song, volumeKey, gen) {
     }
 
     if (status) status.hidden = true;
-    setupPreviewPlayback(side, song, volumeKey, gen, audio, playBtn, status, url);
+    setupPreviewPlayback(side, song, volumeKey, gen, audio, playBtn, status, url, {
+      autoplay,
+    });
   });
 }
 
-function setupPreviewPlayback(side, song, volumeKey, gen, audio, playBtn, status, url) {
+function setupPreviewPlayback(side, song, volumeKey, gen, audio, playBtn, status, url, options = {}) {
+  const { autoplay = false } = options;
+  // crossOrigin before src so the analyser can read real samples from CDN audio
+  prepareMediaElement(audio);
   audio.src = url;
+  connectMediaElement(audio);
   playBtn.disabled = false;
   playBtn.classList.remove('no-preview');
+
+  const pauseOthers = () => {
+    for (const other of ['a', 'b', 'champion', 'transition']) {
+      if (other === side) continue;
+      const o = document.getElementById(`audio-${other}`);
+      if (o && !o.paused) {
+        o.pause();
+        if (other !== 'transition') setPlayingUi(other, false);
+      }
+    }
+  };
+
+  const startPlay = async () => {
+    if (!stillCurrent(gen, playBtn) || !stillCurrent(gen, audio)) return;
+    pauseOthers();
+    try {
+      audio.volume = volumeForTrack(
+        song.id,
+        side === 'champion'
+          ? Number(document.getElementById('vol-champion')?.value || 10) / 100
+          : volumeBySide[volumeKey] ?? DEFAULT_MATCH_VOLUME
+      );
+      rememberTrackVolume(song.id, audio.volume);
+      connectMediaElement(audio);
+      kickScopeFromPlayback();
+      await audio.play();
+      if (!stillCurrent(gen, playBtn)) {
+        audio.pause();
+        return;
+      }
+      setPlayingUi(side, true);
+      kickScopeFromPlayback();
+    } catch {
+      if (stillCurrent(gen, status) && status) {
+        status.hidden = false;
+        status.textContent = 'Could not play preview';
+      }
+    }
+  };
 
   playBtn.onclick = async () => {
     if (!stillCurrent(gen, playBtn) || !stillCurrent(gen, audio)) return;
@@ -680,30 +1069,158 @@ function setupPreviewPlayback(side, song, volumeKey, gen, audio, playBtn, status
       return;
     }
 
-    for (const other of ['a', 'b', 'champion']) {
-      if (other === side) continue;
-      const o = document.getElementById(`audio-${other}`);
-      if (o && !o.paused) {
-        o.pause();
-        setPlayingUi(other, false);
+    await startPlay();
+  };
+
+  audio.onended = () => {
+    if (!stillCurrent(gen, audio)) return;
+    setPlayingUi(side, false);
+  };
+
+  let corsRetryDone = false;
+  audio.onerror = () => {
+    if (!stillCurrent(gen, audio)) return;
+    // CORS-locked preview: one retry without crossOrigin so audio still plays
+    // (scope stays on idle baseline if samples stay inaccessible)
+    if (!corsRetryDone && audio.crossOrigin) {
+      corsRetryDone = true;
+      try {
+        audio.removeAttribute('crossorigin');
+        audio.src = url;
+        return;
+      } catch {
       }
     }
+    setPlayingUi(side, false);
+    if (stillCurrent(gen, status) && status) {
+      status.hidden = false;
+      status.textContent = 'Could not play preview';
+    }
+  };
 
-    try {
-      audio.volume = volumeForTrack(
-        song.id,
-        side === 'champion'
-          ? Number(document.getElementById('vol-champion')?.value || 10) / 100
-          : volumeBySide[volumeKey] ?? DEFAULT_MATCH_VOLUME
-      );
-      rememberTrackVolume(song.id, audio.volume);
+  if (autoplay) {
+    startPlay();
+  }
+}
+
+function wireSongPlayers(songA, songB, gen) {
+  wireOnePlayer('a', songA, 'a', gen);
+  wireOnePlayer('b', songB, 'b', gen);
+}
+
+function wireChampionBedUi(champion, gen) {
+  const audio = getChampionBed();
+  const playBtn = document.getElementById('play-champion');
+  const status = document.getElementById('status-champion');
+  const slider = document.getElementById('vol-champion');
+  if (!playBtn || !isSongLike(champion)) return;
+
+  // Keep whatever volume the bed is already using (seamless from reveal)
+  const vol = championBedIsFor(champion.id)
+    ? audio.volume
+    : volumeForTrack(champion.id, DEFAULT_TRANSITION_VOLUME);
+  audio.volume = vol;
+  if (slider) {
+    slider.value = String(Math.round(vol * 100));
+    const label = document.getElementById('vol-pct-champion');
+    if (label) label.textContent = `${Math.round(vol * 100)}%`;
+  }
+
+  if (slider) {
+    slider.addEventListener('input', () => {
+      if (!stillCurrent(gen, slider)) return;
+      const v = Number(slider.value) / 100;
+      audio.volume = v;
+      rememberTrackVolume(champion.id, v);
+      const label = document.getElementById('vol-pct-champion');
+      if (label) label.textContent = `${slider.value}%`;
       saveProgress();
-      await audio.play();
-      if (!stillCurrent(gen, playBtn)) {
-        audio.pause();
+    });
+  }
+
+  const syncUi = () => {
+    if (!stillCurrent(gen, playBtn)) return;
+    setPlayingUi('champion', !audio.paused && !audio.ended);
+  };
+
+  const alreadyGoing = championBedIsPlaying(champion.id);
+
+  if (alreadyGoing) {
+    // Do not call play()/src — just bind controls to the live stream
+    playBtn.disabled = false;
+    playBtn.classList.remove('no-preview');
+    if (status) status.hidden = true;
+    setPlayingUi('champion', true);
+  } else if (championBedIsFor(champion.id) || championBedLoad?.id === champion.id) {
+    // Loaded or loading from reveal — wait, never reassign src
+    playBtn.disabled = true;
+    if (status) {
+      status.hidden = false;
+      status.textContent = 'Loading preview…';
+    }
+    const pending = championBedLoad?.id === champion.id
+      ? championBedLoad.promise
+      : playChampionBed(champion, vol, { resumeIfPaused: true });
+    Promise.resolve(pending).then((el) => {
+      if (!stillCurrent(gen, playBtn)) return;
+      if (!el) {
+        playBtn.disabled = false;
+        playBtn.classList.add('no-preview');
+        if (status) {
+          status.hidden = false;
+          status.textContent = 'No preview available';
+        }
         return;
       }
-      setPlayingUi(side, true);
+      playBtn.disabled = false;
+      if (status) status.hidden = true;
+      syncUi();
+    });
+  } else {
+    // Cold start (e.g. restored finished save) — start bed once
+    playBtn.disabled = true;
+    if (status) {
+      status.hidden = false;
+      status.textContent = 'Loading preview…';
+    }
+    playChampionBed(champion, vol, { resumeIfPaused: true }).then((el) => {
+      if (!stillCurrent(gen, playBtn)) return;
+      if (!el) {
+        playBtn.disabled = false;
+        playBtn.classList.add('no-preview');
+        if (status) {
+          status.hidden = false;
+          status.textContent = 'No preview available';
+        }
+        return;
+      }
+      playBtn.disabled = false;
+      if (status) status.hidden = true;
+      syncUi();
+    });
+  }
+
+  playBtn.onclick = async () => {
+    if (!stillCurrent(gen, playBtn)) return;
+    if (!audio.paused) {
+      audio.pause();
+      setPlayingUi('champion', false);
+      return;
+    }
+    for (const id of ['audio-a', 'audio-b', 'audio-champion', 'audio-transition']) {
+      const o = document.getElementById(id);
+      if (o && !o.paused) o.pause();
+    }
+    try {
+      // Resume only — never reload src
+      if (!championBedIsFor(champion.id)) {
+        await playChampionBed(champion, audio.volume, { resumeIfPaused: true });
+      } else {
+        kickScopeFromPlayback();
+        await audio.play();
+      }
+      if (!stillCurrent(gen, playBtn)) return;
+      setPlayingUi('champion', true);
     } catch {
       if (stillCurrent(gen, status) && status) {
         status.hidden = false;
@@ -712,20 +1229,22 @@ function setupPreviewPlayback(side, song, volumeKey, gen, audio, playBtn, status
     }
   };
 
-  audio.onended = () => {
-    if (!stillCurrent(gen, audio)) return;
-    setPlayingUi(side, false);
-  };
-}
-
-function wireSongPlayers(songA, songB, gen) {
-  wireOnePlayer('a', songA, 'a', gen);
-  wireOnePlayer('b', songB, 'b', gen);
+  audio.onplay = syncUi;
+  audio.onpause = syncUi;
 }
 
 function renderResults(gen) {
-  const { playlist, champion, history, initialCount } = state;
+  const playlist = state.playlist || {};
+  const champion = state.champion;
+  const history = Array.isArray(state.history) ? state.history : [];
+  const initialCount = state.initialCount || history.length + 1;
   const bracketHtml = buildBracketHtml(history, champion);
+  const bed = document.getElementById('audio-champion-bed');
+  const champVolPct = Math.round(
+    (championBedIsFor(champion.id) && bed
+      ? bed.volume
+      : volumeForTrack(champion.id, DEFAULT_TRANSITION_VOLUME)) * 100
+  );
 
   app.innerHTML = `
     ${brandHeaderHtml('Tournament complete')}
@@ -739,14 +1258,14 @@ function renderResults(gen) {
             ? `<img src="${escapeHtml(playlist.image)}" alt="" width="120" height="120" />`
             : ''
         }
-        <h2>${escapeHtml(playlist.name)}</h2>
+        <h2>${escapeHtml(playlist.name || 'Playlist')}</h2>
         <p class="small muted">${initialCount} songs · ${history.length} matchups</p>
       </div>
 
       <div class="champion-block">
         <p class="label">Winner</p>
         <h3>${escapeHtml(champion.name)}</h3>
-        <p class="artists">${escapeHtml(champion.artists)}</p>
+        <p class="artists">${escapeHtml(champion.artists || '')}</p>
         <div class="card-action-slot volume-control champion-volume">
           <span class="volume-icon" aria-hidden="true">🔊</span>
           <input
@@ -756,19 +1275,17 @@ function renderResults(gen) {
             min="0"
             max="100"
             step="1"
-            value="${Math.round(volumeForTrack(champion.id, DEFAULT_TRANSITION_VOLUME) * 100)}"
+            value="${champVolPct}"
             aria-label="Volume for champion"
           />
-          <span class="volume-pct" id="vol-pct-champion">${Math.round(volumeForTrack(champion.id, DEFAULT_TRANSITION_VOLUME) * 100)}%</span>
+          <span class="volume-pct" id="vol-pct-champion">${champVolPct}%</span>
         </div>
         <div class="cover-player champion-cover">
-          <audio id="audio-champion" preload="none"></audio>
           <button
             type="button"
-            class="cover-play-btn"
+            class="cover-play-btn${championBedIsPlaying(champion.id) ? ' is-playing' : ''}"
             id="play-champion"
-            aria-label="Play preview of ${escapeHtml(champion.name)}"
-            disabled
+            aria-label="Play or pause ${escapeHtml(champion.name)}"
           >
             <span class="cover-art">
               ${
@@ -777,18 +1294,16 @@ function renderResults(gen) {
                   : `<div class="cover-art-fallback" aria-hidden="true">🎵</div>`
               }
             </span>
-            <span class="cover-play-icon" id="play-icon-champion" aria-hidden="true">▶</span>
+            <span class="cover-play-icon" id="play-icon-champion" aria-hidden="true">${
+              championBedIsPlaying(champion.id) ? '❚❚' : '▶'
+            }</span>
           </button>
           <p class="preview-status small muted" id="status-champion" hidden></p>
         </div>
       </div>
 
-      <p class="share-toast" id="share-toast" aria-live="polite">${escapeHtml(shareMsg)}</p>
-
       <div class="results-actions">
-        <button type="button" id="share-btn">Share results</button>
-        <button type="button" class="secondary" id="copy-btn">Copy summary</button>
-        <button type="button" class="secondary" id="again-btn">New tournament</button>
+        <button type="button" id="new-game-btn">Start new game!</button>
       </div>
 
       <section class="bracket-section" id="bracket-section">
@@ -798,26 +1313,9 @@ function renderResults(gen) {
     </div>
   `;
 
-  document.getElementById('share-btn').addEventListener('click', onShare);
-  document.getElementById('copy-btn').addEventListener('click', onCopySummary);
-  document.getElementById('again-btn').addEventListener('click', onQuit);
-  wireOnePlayer('champion', champion, 'a', gen);
-
-  // Auto-play champion at the volume the user last set for that track
-  const champAudio = document.getElementById('audio-champion');
-  if (champAudio) {
-    const champVol = volumeForTrack(champion.id, DEFAULT_TRANSITION_VOLUME);
-    ensurePreviewUrl(champion.id).then((url) => {
-      if (gen !== renderGeneration || !url || !champAudio.isConnected) return;
-      champAudio.volume = champVol;
-      const slider = document.getElementById('vol-champion');
-      const label = document.getElementById('vol-pct-champion');
-      if (slider) slider.value = String(Math.round(champVol * 100));
-      if (label) label.textContent = `${Math.round(champVol * 100)}%`;
-      champAudio.src = url;
-      champAudio.play().then(() => setPlayingUi('champion', true)).catch(() => {});
-    });
-  }
+  document.getElementById('new-game-btn')?.addEventListener('click', onQuit);
+  // Bind UI only — never restart the bed if reveal already started it
+  wireChampionBedUi(champion, gen);
 }
 
 function mmRoundLabel(matches, initialCount) {
@@ -836,6 +1334,9 @@ function mmRoundLabel(matches, initialCount) {
 }
 
 function mmCoverHtml(song, role) {
+  if (!isSongLike(song)) {
+    return `<div class="mm-cover mm-${escapeHtml(role)}"><div class="mm-cover-inner"><span class="mm-fallback" aria-hidden="true">🎵</span></div></div>`;
+  }
   const tip = `${song.name}${song.artists ? ` — ${song.artists}` : ''}`;
   const inner = song.image
     ? `<img src="${escapeHtml(song.image)}" alt="" loading="lazy" draggable="false" />`
@@ -852,6 +1353,7 @@ function mmCoverHtml(song, role) {
 }
 
 function mmMatchHtml(m) {
+  if (!m?.a || !m?.b) return '';
   const aWin = m.winnerId === m.a.id;
   return `
     <div class="mm-match">
@@ -1000,33 +1502,25 @@ function buildBracketHtml(history, champion) {
   `;
 }
 
-function resultsSummaryText() {
-  if (!state?.champion) return '';
-  const { playlist, champion, history, initialCount } = state;
-  return [
-    `Playlist Bracket results`,
-    `Playlist: ${playlist.name}`,
-    `Champion: ${champion.name} — ${champion.artists}`,
-    `Songs: ${initialCount} · Matchups: ${history.length}`,
-    playlist.spotifyUrl ? `Playlist: ${playlist.spotifyUrl}` : '',
-    champion.spotifyUrl ? `Winner: ${champion.spotifyUrl}` : '',
-  ]
-    .filter(Boolean)
-    .join('\n');
-}
-
 async function onStart(e) {
   e.preventDefault();
   error = '';
   const form = e.target;
-  const url = form.url.value.trim();
-  const seeding = form.seeding.value === 'shuffle' ? 'shuffle' : 'order';
+  const url = form.url?.value?.trim?.() || '';
+  const seeding = form.seeding?.value === 'shuffle' ? 'shuffle' : 'order';
+  if (!url) {
+    error = 'Paste a public Spotify playlist link.';
+    render();
+    return;
+  }
 
   loadGeneration += 1;
   const myLoad = loadGeneration;
 
   clearTransitionTimer();
   roundTransition = null;
+  disposeMedia({ removeTransition: true });
+  stopChampionBed();
   clearPreviewCache();
   state = null;
   playlistTracks = [];
@@ -1044,12 +1538,16 @@ async function onStart(e) {
     }
     if (myLoad !== loadGeneration) return;
 
-    playlistTracks = Array.isArray(data.tracks) ? data.tracks : [];
+    const tracks = Array.isArray(data.tracks) ? data.tracks.filter(isSongLike) : [];
+    if (tracks.length < 2) {
+      throw new Error('Need at least 2 playable songs in the playlist to run a tournament.');
+    }
+
+    playlistTracks = tracks;
     transitionSongIndex = 0;
     clearTrackVolumes();
-    state = createTournament(data, data.tracks, seeding);
-    shareMsg = '';
-    saveProgress();
+    state = createTournament(data, tracks, seeding);
+    saveProgress({ immediate: true });
   } catch (err) {
     if (myLoad !== loadGeneration) return;
     error = err.message || 'Could not start tournament.';
@@ -1066,15 +1564,16 @@ async function onStart(e) {
 }
 
 function onPick(side) {
-  if (!state || roundTransition) return;
+  if (!state || roundTransition || state.finished) return;
+  if (side !== 'a' && side !== 'b') return;
+  if (!currentMatch(state)) return;
 
   const fromLabel = progress(state).roundLabel;
   const prevRound = state.roundNumber;
   const prevRegion = currentMatch(state)?.region;
 
   state = pickWinner(state, side);
-  shareMsg = '';
-  saveProgress();
+  saveProgress({ immediate: true });
 
   if (state.finished) {
     scheduleTransition(
@@ -1113,6 +1612,8 @@ function onQuit() {
   loadGeneration += 1;
   clearTransitionTimer();
   roundTransition = null;
+  disposeMedia({ removeTransition: true });
+  stopChampionBed();
   clearPreviewCache();
   clearSavedProgress();
   state = null;
@@ -1120,7 +1621,6 @@ function onQuit() {
   transitionSongIndex = 0;
   clearTrackVolumes();
   error = '';
-  shareMsg = '';
   clearStageVibe();
   render();
 }
@@ -1129,46 +1629,28 @@ function goHome() {
   onQuit();
 }
 
-async function onCopySummary() {
-  if (!state?.champion) return;
-  try {
-    await navigator.clipboard.writeText(resultsSummaryText());
-    shareMsg = 'Summary copied to clipboard.';
-  } catch {
-    shareMsg = 'Could not copy — try selecting the text manually.';
-  }
-  render();
-}
-
-async function onShare() {
-  if (!state?.champion) return;
-  const text = resultsSummaryText();
-  const title = `Champion: ${state.champion.name}`;
-
-  if (navigator.share) {
-    try {
-      await navigator.share({ title, text });
-      shareMsg = 'Shared.';
-      render();
-      return;
-    } catch (err) {
-      if (err?.name === 'AbortError') return;
-    }
-  }
-
-  try {
-    await navigator.clipboard.writeText(text);
-    shareMsg = 'Share not available — summary copied instead.';
-  } catch {
-    shareMsg = 'Could not share or copy automatically.';
-  }
-  render();
-}
-
 app.addEventListener('click', (e) => {
   if (!e.target.closest('[data-home]')) return;
   e.preventDefault();
   goHome();
+});
+
+// Flush debounced saves and stop audio when leaving the tab/page
+window.addEventListener('pagehide', () => {
+  if (saveTimer != null) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    saveProgressNow();
+  }
+  disposeMedia({ removeTransition: true });
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && saveTimer != null) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    saveProgressNow();
+  }
 });
 
 const restored = loadProgress();
@@ -1177,4 +1659,6 @@ if (restored) {
   roundTransition = null;
 }
 
+// Idle baseline wave; becomes a real scope when a preview plays
+startScope();
 render();

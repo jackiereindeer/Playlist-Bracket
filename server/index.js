@@ -17,7 +17,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '32kb' }));
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
@@ -25,7 +25,8 @@ app.get('/api/health', (_req, res) => {
 
 app.get('/api/playlist', async (req, res) => {
   try {
-    const playlistId = extractPlaylistId(req.query.url || req.query.id || '');
+    const raw = String(req.query.url || req.query.id || '').slice(0, 500);
+    const playlistId = extractPlaylistId(raw);
     if (!playlistId) {
       return res.status(400).json({
         error: 'Invalid playlist link. Paste a Spotify playlist URL (must be public).',
@@ -34,12 +35,13 @@ app.get('/api/playlist', async (req, res) => {
 
     const playlist = await fetchPublicPlaylist(playlistId);
 
-    if (playlist.tracks.length < 2) {
+    if (!playlist?.tracks || playlist.tracks.length < 2) {
       return res.status(400).json({
         error: 'Need at least 2 playable songs in the playlist to run a tournament.',
       });
     }
 
+    res.set('Cache-Control', 'private, max-age=60');
     res.json(playlist);
   } catch (err) {
     console.error('[api/playlist]', err.message, err.code || '', err.details || '');
@@ -52,7 +54,12 @@ app.get('/api/playlist', async (req, res) => {
 
 app.get('/api/preview/:trackId', async (req, res) => {
   try {
-    const data = await fetchTrackPreview(req.params.trackId);
+    const trackId = String(req.params.trackId || '').slice(0, 64);
+    if (!/^[a-zA-Z0-9]+$/.test(trackId)) {
+      return res.status(400).json({ error: 'Invalid track id.' });
+    }
+
+    const data = await fetchTrackPreview(trackId);
     if (!data.previewUrl) {
       return res.status(404).json({
         error: 'No preview available for this track.',
@@ -60,6 +67,8 @@ app.get('/api/preview/:trackId', async (req, res) => {
         previewUrl: null,
       });
     }
+    // Previews are stable CDN URLs — short cache cuts repeat scrapes
+    res.set('Cache-Control', 'public, max-age=300');
     res.json(data);
   } catch (err) {
     console.error('[api/preview]', err.message);
@@ -70,11 +79,23 @@ app.get('/api/preview/:trackId', async (req, res) => {
 });
 
 const distPath = path.join(root, 'dist');
-app.use(express.static(distPath));
+app.use(
+  express.static(distPath, {
+    // Avoid stale SPA shells after deploys; hashed assets still cache well
+    maxAge: isProd ? '1h' : 0,
+    index: false,
+  })
+);
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
   res.sendFile(path.join(distPath, 'index.html'), (err) => {
-    if (err) next();
+    if (err) {
+      if (!res.headersSent) {
+        res.status(404).type('text').send('Build the app first (npm run build), or use npm run dev.');
+      } else {
+        next(err);
+      }
+    }
   });
 });
 

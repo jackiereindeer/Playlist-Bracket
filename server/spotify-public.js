@@ -84,6 +84,10 @@ async function refreshCookieJar() {
     const setCookies = res.headers.getSetCookie?.() || [];
     cookieJar = mergeCookies(cookieJar, setCookies);
     cookieJarAt = Date.now();
+    // Cap cookie jar size so a noisy origin can't grow it forever
+    if (cookieJar.length > 8000) {
+      cookieJar = cookieJar.slice(0, 8000);
+    }
   } catch {
   }
   return cookieJar;
@@ -413,7 +417,7 @@ async function fetchPublicPlaylist(playlistId) {
 }
 
 async function fetchTrackPreview(trackId) {
-  const id = String(trackId || '').replace(/[^a-zA-Z0-9]/g, '');
+  const id = String(trackId || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 64);
   if (!id) {
     const err = new Error('Invalid track id');
     err.status = 400;
@@ -429,6 +433,7 @@ async function fetchTrackPreview(trackId) {
         await new Promise((r) => setTimeout(r, 250 * attempt));
       }
       const html = await fetchEmbedHtml('track', id);
+      // Avoid holding multi-MB HTML longer than needed
       const next = parseNextData(html);
       const entity = next?.props?.pageProps?.state?.data?.entity;
       const previewUrl = extractPreviewUrlFromHtml(html, next);
