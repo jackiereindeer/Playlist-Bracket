@@ -4,6 +4,7 @@ import {
   pickWinner,
   currentMatch,
   progress,
+  shuffle,
 } from './tournament.js';
 import {
   prepareMediaElement,
@@ -67,8 +68,24 @@ let setupDraft = null;
 /** Remember last paste on “Different playlist” so the load form isn’t empty. */
 let lastSetupUrl = '';
 
-/** home = mode pick · solo = original local game · party = multiplayer (local WS) */
+/** home = mode pick · solo = bracket · rating = rate 0–10 · party = multiplayer WS */
 let uiMode = 'home';
+/**
+ * When on setup screens under solo/rating, which game starts after the roster.
+ * @type {'bracket'|'rating'}
+ */
+let setupGameMode = 'bracket';
+/**
+ * Active Rating Mode session (song-by-song 0–10 scores).
+ * @type {null | {
+ *   meta: object,
+ *   entries: { song: object, rating: number|null }[],
+ *   index: number,
+ *   finished: boolean,
+ *   draft: number,
+ * }}
+ */
+let ratingSession = null;
 /** @type {{ destroy: () => void } | null} */
 let partyHandle = null;
 
@@ -659,6 +676,7 @@ function disposeMedia({ removeTransition = false } = {}) {
     if (side !== 'champion-bed') destroyYouTubePlayer(side);
   }
   destroyYouTubePlayer('transition');
+  destroyYouTubePlayer('rating');
 
   // Legacy one-off fade clones (pre-pool) — disconnect and remove
   for (const el of document.querySelectorAll('audio[id^="fade-match-"]')) {
@@ -1199,7 +1217,33 @@ function enterSolo() {
     }
     partyHandle = null;
   }
+  clearRatingSession();
+  setupGameMode = 'bracket';
   uiMode = 'solo';
+  error = '';
+  render();
+}
+
+function enterRating() {
+  if (partyHandle) {
+    try {
+      partyHandle.destroy();
+    } catch {
+    }
+    partyHandle = null;
+  }
+  // Leave any in-progress bracket behind
+  clearTransitionTimer();
+  roundTransition = null;
+  matchWinBeat = null;
+  state = null;
+  disposeMedia({ removeTransition: true });
+  stopChampionBed();
+  clearRatingSession();
+  clearSetupDraft();
+  setupGameMode = 'rating';
+  uiMode = 'rating';
+  error = '';
   render();
 }
 
@@ -1207,6 +1251,8 @@ function enterParty() {
   // Party owns #app — stop solo media first
   clearTransitionTimer();
   roundTransition = null;
+  matchWinBeat = null;
+  clearRatingSession();
   disposeMedia({ removeTransition: true });
   stopChampionBed();
   clearStageVibe();
@@ -1231,6 +1277,10 @@ function enterParty() {
   });
 }
 
+function clearRatingSession() {
+  ratingSession = null;
+}
+
 function renderHome() {
   document.body.classList.add('on-setup');
   app.innerHTML = `
@@ -1246,7 +1296,11 @@ function renderHome() {
         <div class="home-actions">
           <button type="button" id="mode-solo" class="home-mode-btn">
             <strong>Solo</strong>
-            <span>You vs the playlist</span>
+            <span>1v1 bracket · pick winners</span>
+          </button>
+          <button type="button" id="mode-rating" class="home-mode-btn home-mode-rating">
+            <strong>Rating Mode</strong>
+            <span>Rate each song 0–10 · ranked list at the end</span>
           </button>
           <button type="button" id="mode-party" class="home-mode-btn home-mode-party">
             <strong>Play with friends</strong>
@@ -1257,12 +1311,31 @@ function renderHome() {
     </div>
   `;
   document.getElementById('mode-solo')?.addEventListener('click', enterSolo);
+  document.getElementById('mode-rating')?.addEventListener('click', enterRating);
   document.getElementById('mode-party')?.addEventListener('click', enterParty);
 }
 
 function render() {
   // Party mode draws itself; don't wipe #app
   if (uiMode === 'party') return;
+
+  // Rating mode owns its own screens (don't run tournament dispose logic over them)
+  if (uiMode === 'rating' && ratingSession) {
+    document.body.classList.remove('on-setup');
+    renderGeneration += 1;
+    const gen = renderGeneration;
+    if (ratingSession.finished) {
+      disposeMedia({ removeTransition: true });
+      applyStageVibe(1);
+      renderRatingResults(gen);
+    } else {
+      applyStageVibe(
+        Math.max(2, (ratingSession.entries?.length || 0) - (ratingSession.index || 0))
+      );
+      renderRatingSong(gen);
+    }
+    return;
+  }
 
   // Solo match-win beat owns the screen — don't run normal dispose (kills the beat audio)
   if (matchWinBeat && isSongLike(matchWinBeat.song)) {
@@ -1339,7 +1412,7 @@ function render() {
   }
 
   clearStageVibe();
-  if (uiMode === 'solo') {
+  if (uiMode === 'solo' || uiMode === 'rating') {
     renderSetup();
     return;
   }
@@ -1425,6 +1498,7 @@ function renderSetupLoad() {
   document.getElementById('setup-load-form')?.addEventListener('submit', onLoadPlaylist);
   document.getElementById('solo-back-home')?.addEventListener('click', () => {
     clearSetupDraft();
+    clearRatingSession();
     error = '';
     uiMode = 'home';
     render();
@@ -1481,7 +1555,9 @@ function renderSetupRoster() {
           <div class="roster-header-text">
             <h2 class="roster-title">${escapeHtml(metaName)}</h2>
             <p class="roster-sub muted small">
-              <strong id="roster-count">${included}</strong> of ${total} in the bracket
+              <strong id="roster-count">${included}</strong> of ${total} ${
+                setupGameMode === 'rating' ? 'to rate' : 'in the bracket'
+              }
               ${
                 draft.meta?.owner
                   ? ` · ${escapeHtml(String(draft.meta.owner))}`
@@ -1517,7 +1593,7 @@ function renderSetupRoster() {
         </div>
 
         <div class="field">
-          <label>Matchup order</label>
+          <label>${setupGameMode === 'rating' ? 'Listen order' : 'Matchup order'}</label>
           <div class="seed-options">
             <div class="seed-option">
               <input type="radio" name="seeding" id="seed-order" value="order" ${
@@ -1525,7 +1601,11 @@ function renderSetupRoster() {
               } ${busy ? 'disabled' : ''} />
               <label for="seed-order">
                 Playlist order
-                <span>1st vs 2nd, 3rd vs 4th…</span>
+                <span>${
+                  setupGameMode === 'rating'
+                    ? 'Rate in list order'
+                    : '1st vs 2nd, 3rd vs 4th…'
+                }</span>
               </label>
             </div>
             <div class="seed-option">
@@ -1534,7 +1614,9 @@ function renderSetupRoster() {
               } ${busy ? 'disabled' : ''} />
               <label for="seed-shuffle">
                 Shuffle
-                <span>Random matchups</span>
+                <span>${
+                  setupGameMode === 'rating' ? 'Random order' : 'Random matchups'
+                }</span>
               </label>
             </div>
           </div>
@@ -1549,8 +1631,16 @@ function renderSetupRoster() {
         }
 
         <div class="form-actions">
-          <button type="button" id="start-btn" ${busy || included < 2 ? 'disabled' : ''}>
-            ${busy && draft.busy === 'start' ? 'Starting…' : `Start tournament (${included})`}
+          <button type="button" id="start-btn" ${
+            busy || included < (setupGameMode === 'rating' ? 1 : 2) ? 'disabled' : ''
+          }>
+            ${
+              busy && draft.busy === 'start'
+                ? 'Starting…'
+                : setupGameMode === 'rating'
+                  ? `Start rating (${included})`
+                  : `Start tournament (${included})`
+            }
           </button>
           <button type="button" class="ghost" id="solo-back-home" ${busy ? 'disabled' : ''}>Back to menu</button>
         </div>
@@ -1567,9 +1657,14 @@ function updateRosterCountUi() {
   const start = document.getElementById('start-btn');
   if (start && setupDraft) {
     const n = selectedCount();
-    start.disabled = Boolean(setupDraft.busy) || n < 2;
+    const min = setupGameMode === 'rating' ? 1 : 2;
+    start.disabled = Boolean(setupDraft.busy) || n < min;
     start.textContent =
-      setupDraft.busy === 'start' ? 'Starting…' : `Start tournament (${n})`;
+      setupDraft.busy === 'start'
+        ? 'Starting…'
+        : setupGameMode === 'rating'
+          ? `Start rating (${n})`
+          : `Start tournament (${n})`;
   }
 }
 
@@ -1630,6 +1725,7 @@ function wireSetupRoster() {
   document.getElementById('start-btn')?.addEventListener('click', () => onStartFromDraft());
   document.getElementById('solo-back-home')?.addEventListener('click', () => {
     clearSetupDraft();
+    clearRatingSession();
     error = '';
     uiMode = 'home';
     render();
@@ -1815,7 +1911,7 @@ async function onAddSongToDraft() {
 }
 
 /**
- * Start the tournament from the curated roster (selected songs only).
+ * Start bracket tournament or Rating Mode from the curated roster.
  */
 function onStartFromDraft() {
   if (!setupDraft || setupDraft.busy) return;
@@ -1828,9 +1924,15 @@ function onStartFromDraft() {
       : 'order';
   setupDraft.seeding = seeding;
 
-  const tracks = setupDraft.tracks.filter((t) => setupDraft.selected.has(t.id) && isSongLike(t));
-  if (tracks.length < 2) {
-    error = 'Pick at least 2 songs for the tournament.';
+  let tracks = setupDraft.tracks.filter(
+    (t) => setupDraft.selected.has(t.id) && isSongLike(t)
+  );
+  const isRating = setupGameMode === 'rating' || uiMode === 'rating';
+  const minSongs = isRating ? 1 : 2;
+  if (tracks.length < minSongs) {
+    error = isRating
+      ? 'Pick at least 1 song to rate.'
+      : 'Pick at least 2 songs for the tournament.';
     render();
     return;
   }
@@ -1846,33 +1948,440 @@ function onStartFromDraft() {
   clearUndoStack();
   clearTrackVolumes();
   transitionSongIndex = 0;
+  state = null;
 
   const meta = {
     id: setupDraft.meta?.id || 'custom',
-    name: setupDraft.meta?.name || 'Custom bracket',
+    name: setupDraft.meta?.name || (isRating ? 'Rating session' : 'Custom bracket'),
     description: setupDraft.meta?.description || '',
     image: setupDraft.meta?.image || tracks[0]?.image || null,
     owner: setupDraft.meta?.owner || '',
     spotifyUrl: setupDraft.meta?.spotifyUrl || null,
     source: setupDraft.meta?.source || tracks[0]?.source || 'spotify',
-    tracks, // createTournament may ignore; keep for consistency
+    tracks,
   };
 
   try {
-    playlistTracks = tracks;
-    state = createTournament(meta, tracks, seeding);
-    if (meta.source === 'youtube' || tracks.some(isYouTubeTrack)) {
-      loadYouTubeApi().catch(() => {});
+    if (seeding === 'shuffle') {
+      tracks = shuffle(tracks);
     }
-    saveProgress({ immediate: true });
-    clearSetupDraft();
-    error = '';
+    playlistTracks = tracks;
+
+    if (isRating) {
+      ratingSession = {
+        meta,
+        entries: tracks.map((song) => ({ song, rating: null })),
+        index: 0,
+        finished: false,
+        draft: 5.0,
+      };
+      uiMode = 'rating';
+      if (meta.source === 'youtube' || tracks.some(isYouTubeTrack)) {
+        loadYouTubeApi().catch(() => {});
+      }
+      clearSetupDraft();
+      error = '';
+    } else {
+      clearRatingSession();
+      // tracks may already be shuffled above; pass 'order' so createTournament keeps that list
+      state = createTournament(meta, tracks, 'order');
+      uiMode = 'solo';
+      if (meta.source === 'youtube' || tracks.some(isYouTubeTrack)) {
+        loadYouTubeApi().catch(() => {});
+      }
+      saveProgress({ immediate: true });
+      clearSetupDraft();
+      error = '';
+    }
   } catch (err) {
-    error = err.message || 'Could not start tournament.';
+    error = err.message || 'Could not start.';
     state = null;
+    clearRatingSession();
     playlistTracks = [];
   }
   render();
+}
+
+// ─── Rating Mode ─────────────────────────────────────────────────────────────
+
+function clampRating(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.min(10, Math.max(0, Math.round(x * 10) / 10));
+}
+
+function formatRating(n) {
+  const v = clampRating(n);
+  return Number.isInteger(v) ? String(v) : v.toFixed(1);
+}
+
+function ratingDraftValue() {
+  if (!ratingSession) return 5;
+  if (ratingSession.draft != null && Number.isFinite(ratingSession.draft)) {
+    return clampRating(ratingSession.draft);
+  }
+  const cur = ratingSession.entries[ratingSession.index];
+  if (cur?.rating != null) return clampRating(cur.rating);
+  return 5;
+}
+
+function setRatingDraft(n) {
+  if (!ratingSession || ratingSession.finished) return;
+  ratingSession.draft = clampRating(n);
+  const big = document.getElementById('rating-big');
+  if (big) big.textContent = formatRating(ratingSession.draft);
+  const slider = document.getElementById('rating-slider');
+  if (slider) slider.value = String(ratingSession.draft);
+  document.querySelectorAll('[data-rating-btn]').forEach((btn) => {
+    const v = Number(btn.getAttribute('data-rating-btn'));
+    btn.classList.toggle('is-active', Math.floor(ratingSession.draft) === v);
+  });
+}
+
+/**
+ * One song at a time: art, play, 0–10 buttons + 0.1 slider.
+ */
+function renderRatingSong(gen) {
+  const session = ratingSession;
+  if (!session || session.finished) return;
+
+  const total = session.entries.length;
+  const idx = Math.min(session.index, total - 1);
+  session.index = idx;
+  const entry = session.entries[idx];
+  const song = entry?.song;
+  if (!isSongLike(song)) {
+    error = 'This rating session is broken — start again.';
+    clearRatingSession();
+    uiMode = 'rating';
+    render();
+    return;
+  }
+
+  // Prefer existing rating when revisiting; else keep draft
+  if (entry.rating != null && Number.isFinite(entry.rating)) {
+    session.draft = clampRating(entry.rating);
+  } else if (session.draft == null || !Number.isFinite(session.draft)) {
+    session.draft = 5.0;
+  } else {
+    session.draft = clampRating(session.draft);
+  }
+
+  const draft = session.draft;
+  const art = song.image
+    ? `<img class="rating-art" src="${escapeHtml(song.image)}" alt="" />`
+    : `<div class="rating-art rating-art-fallback" aria-hidden="true">🎵</div>`;
+  const yt = isYouTubeTrack(song);
+  const buttons = Array.from({ length: 11 }, (_, i) => {
+    const active = Math.floor(draft) === i ? ' is-active' : '';
+    return `<button type="button" class="rating-num-btn${active}" data-rating-btn="${i}">${i}</button>`;
+  }).join('');
+
+  const isLast = idx >= total - 1;
+  const progressPct = total ? Math.round((idx / total) * 100) : 0;
+
+  app.innerHTML = `
+    <div class="rating-page">
+      ${brandHeaderHtml('Rating Mode')}
+      <div class="rating-progress-bar" aria-hidden="true">
+        <span style="width:${progressPct}%"></span>
+      </div>
+      <p class="rating-progress-label muted small">${idx + 1} / ${total}</p>
+
+      <article class="card rating-card">
+        <div class="rating-cover ${yt ? 'is-yt' : ''}" id="rating-cover">
+          ${art}
+          ${
+            yt
+              ? `<div id="yt-rating" class="rating-yt-host"></div>`
+              : ''
+          }
+          <button type="button" class="rating-play" id="rating-play" title="Play / pause">
+            <span id="rating-play-icon">▶</span>
+          </button>
+        </div>
+        <h2 class="rating-title">${escapeHtml(song.name || 'Unknown')}</h2>
+        <p class="rating-artists muted">${escapeHtml(song.artists || '')}</p>
+
+        <div class="rating-score-block">
+          <p class="rating-big" id="rating-big">${formatRating(draft)}</p>
+          <p class="muted small">Your rating</p>
+        </div>
+
+        <div class="rating-num-row" role="group" aria-label="Rating 0 to 10">
+          ${buttons}
+        </div>
+
+        <div class="rating-fine">
+          <button type="button" class="ghost small-btn" id="rating-minus" title="−0.1">−0.1</button>
+          <input
+            type="range"
+            id="rating-slider"
+            min="0"
+            max="10"
+            step="0.1"
+            value="${draft}"
+            aria-label="Fine rating"
+          />
+          <button type="button" class="ghost small-btn" id="rating-plus" title="+0.1">+0.1</button>
+        </div>
+
+        <div class="rating-actions form-actions">
+          <button type="button" class="ghost" id="rating-back" ${idx === 0 ? 'disabled' : ''}>
+            Back
+          </button>
+          <button type="button" id="rating-next">
+            ${isLast ? 'Finish' : 'Next song'}
+          </button>
+        </div>
+        <button type="button" class="ghost small-btn rating-quit" id="rating-quit">Quit to menu</button>
+      </article>
+    </div>
+  `;
+
+  wireRatingSong(gen, song, yt);
+}
+
+function wireRatingSong(gen, song, yt) {
+  document.querySelectorAll('[data-rating-btn]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const whole = Number(btn.getAttribute('data-rating-btn'));
+      // Keep decimal part if user already refined, only when landing on same integer
+      const cur = ratingDraftValue();
+      const next =
+        Math.floor(cur) === whole && cur % 1 !== 0 ? cur : whole;
+      setRatingDraft(next);
+    });
+  });
+
+  const slider = document.getElementById('rating-slider');
+  slider?.addEventListener('input', () => {
+    setRatingDraft(Number(slider.value));
+  });
+
+  document.getElementById('rating-minus')?.addEventListener('click', () => {
+    setRatingDraft(ratingDraftValue() - 0.1);
+  });
+  document.getElementById('rating-plus')?.addEventListener('click', () => {
+    setRatingDraft(ratingDraftValue() + 0.1);
+  });
+
+  document.getElementById('rating-back')?.addEventListener('click', () => {
+    if (!ratingSession || ratingSession.index <= 0) return;
+    // save current draft onto current song before leaving
+    const cur = ratingSession.entries[ratingSession.index];
+    if (cur) cur.rating = ratingDraftValue();
+    disposeMedia({ removeTransition: true });
+    ratingSession.index -= 1;
+    const prev = ratingSession.entries[ratingSession.index];
+    ratingSession.draft =
+      prev?.rating != null ? clampRating(prev.rating) : 5.0;
+    render();
+  });
+
+  document.getElementById('rating-next')?.addEventListener('click', () => {
+    if (!ratingSession) return;
+    const cur = ratingSession.entries[ratingSession.index];
+    if (cur) cur.rating = ratingDraftValue();
+    disposeMedia({ removeTransition: true });
+    if (ratingSession.index >= ratingSession.entries.length - 1) {
+      ratingSession.finished = true;
+      ratingSession.index = ratingSession.entries.length;
+    } else {
+      ratingSession.index += 1;
+      const next = ratingSession.entries[ratingSession.index];
+      ratingSession.draft =
+        next?.rating != null ? clampRating(next.rating) : 5.0;
+    }
+    render();
+  });
+
+  document.getElementById('rating-quit')?.addEventListener('click', () => {
+    disposeMedia({ removeTransition: true });
+    clearRatingSession();
+    clearSetupDraft();
+    error = '';
+    uiMode = 'home';
+    render();
+  });
+
+  // Play controls
+  const playBtn = document.getElementById('rating-play');
+  const playIcon = document.getElementById('rating-play-icon');
+  if (!playBtn) return;
+
+  if (yt) {
+    const vid = youtubeVideoId(song);
+    playBtn.addEventListener('click', async () => {
+      if (!stillCurrent(gen, playBtn) || !vid) return;
+      if (youtubeIsPlaying('rating')) {
+        pauseYouTube('rating');
+        if (playIcon) playIcon.textContent = '▶';
+        return;
+      }
+      try {
+        pauseAllYouTubeExcept('rating');
+        const audio = document.getElementById('audio-a');
+        if (audio) hardStopAudio(audio);
+        await mountYouTubePlayer('rating', vid, {
+          volume01: volumeBySide.a ?? DEFAULT_MATCH_VOLUME,
+          autoplay: true,
+          onPlaying: () => {
+            if (playIcon) playIcon.textContent = '❚❚';
+            kickScopeFromPlayback();
+          },
+          onPaused: () => {
+            if (playIcon) playIcon.textContent = '▶';
+          },
+        });
+        setYouTubeVolume('rating', volumeBySide.a ?? DEFAULT_MATCH_VOLUME);
+      } catch {
+        if (playIcon) playIcon.textContent = '▶';
+      }
+    });
+    // Autoplay once when card appears
+    mountYouTubePlayer('rating', vid, {
+      volume01: volumeBySide.a ?? DEFAULT_MATCH_VOLUME,
+      autoplay: true,
+      onPlaying: () => {
+        if (playIcon && playIcon.isConnected) playIcon.textContent = '❚❚';
+        kickScopeFromPlayback();
+      },
+    }).catch(() => {});
+    return;
+  }
+
+  // Spotify HTML audio via pool player side "a"
+  const audio = getPoolAudio('a');
+  ensurePreviewUrl(song.id).then((url) => {
+    if (!stillCurrent(gen, playBtn) || !url) return;
+    hardStopAudio(audio);
+    prepareMediaElement(audio);
+    audio.src = url;
+    try {
+      audio.dataset.trackId = song.id;
+    } catch {
+    }
+    connectMediaElement(audio);
+    audio.volume = volumeBySide.a ?? DEFAULT_MATCH_VOLUME;
+
+    const start = async () => {
+      try {
+        pauseAllYouTubeExcept(null);
+        await resumeAudioContext();
+        kickScopeFromPlayback();
+        await audio.play();
+        if (playIcon) playIcon.textContent = '❚❚';
+      } catch {
+        if (playIcon) playIcon.textContent = '▶';
+      }
+    };
+
+    playBtn.onclick = async () => {
+      if (!stillCurrent(gen, playBtn)) return;
+      if (!audio.paused) {
+        audio.pause();
+        if (playIcon) playIcon.textContent = '▶';
+        return;
+      }
+      await start();
+    };
+    start();
+  });
+}
+
+/**
+ * End screen: all songs sorted by rating (high → low), art with score overlay.
+ */
+function renderRatingResults(gen) {
+  const session = ratingSession;
+  if (!session) return;
+
+  const ranked = session.entries
+    .map((e, i) => ({
+      song: e.song,
+      rating: e.rating != null ? clampRating(e.rating) : 0,
+      order: i,
+    }))
+    .filter((e) => isSongLike(e.song))
+    .sort((a, b) => {
+      if (b.rating !== a.rating) return b.rating - a.rating;
+      return a.order - b.order;
+    });
+
+  const name = session.meta?.name || 'Your ratings';
+  const cards = ranked
+    .map((e, rank) => {
+      const art = e.song.image
+        ? `<img src="${escapeHtml(e.song.image)}" alt="" loading="lazy" />`
+        : `<div class="rating-result-fallback" aria-hidden="true">🎵</div>`;
+      return `
+        <article class="rating-result-card" style="--rank-delay:${Math.min(rank, 20) * 40}ms">
+          <div class="rating-result-art">
+            ${art}
+            <span class="rating-result-badge">${formatRating(e.rating)}</span>
+            <span class="rating-result-rank">#${rank + 1}</span>
+          </div>
+          <div class="rating-result-meta">
+            <strong class="rating-result-name">${escapeHtml(e.song.name || '')}</strong>
+            <span class="rating-result-artists muted small">${escapeHtml(
+              e.song.artists || ''
+            )}</span>
+          </div>
+        </article>
+      `;
+    })
+    .join('');
+
+  const avg =
+    ranked.length > 0
+      ? ranked.reduce((s, e) => s + e.rating, 0) / ranked.length
+      : 0;
+
+  app.innerHTML = `
+    <div class="rating-page rating-results-page">
+      ${brandHeaderHtml('Rating Mode')}
+      <header class="rating-results-header card">
+        <h2>${escapeHtml(name)}</h2>
+        <p class="muted small">
+          ${ranked.length} song${ranked.length === 1 ? '' : 's'} · average
+          <strong>${formatRating(avg)}</strong>
+        </p>
+      </header>
+      <div class="rating-results-grid" id="rating-results-grid">
+        ${cards || '<p class="muted">No ratings.</p>'}
+      </div>
+      <div class="form-actions rating-results-actions">
+        <button type="button" id="rating-again">Rate again</button>
+        <button type="button" class="ghost" id="rating-home">Back to menu</button>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('rating-again')?.addEventListener('click', () => {
+    disposeMedia({ removeTransition: true });
+    // Restart same list, clear ratings
+    if (ratingSession) {
+      ratingSession.entries = ratingSession.entries.map((e) => ({
+        song: e.song,
+        rating: null,
+      }));
+      ratingSession.index = 0;
+      ratingSession.finished = false;
+      ratingSession.draft = 5.0;
+    }
+    render();
+  });
+  document.getElementById('rating-home')?.addEventListener('click', () => {
+    disposeMedia({ removeTransition: true });
+    clearRatingSession();
+    clearSetupDraft();
+    error = '';
+    uiMode = 'home';
+    render();
+  });
+
+  void gen;
 }
 
 /** Top-left toggle during solo play — skip full-screen win beat between matches. */

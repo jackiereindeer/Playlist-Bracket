@@ -2561,6 +2561,330 @@ body[data-stage='quarters'] .vs-badge {
   border-color: color-mix(in srgb, var(--accent, #a78bfa) 50%, var(--border));
 }
 
+.home-mode-rating {
+  border-color: color-mix(in srgb, #fbbf24 45%, var(--border));
+}
+
+/* ─── Rating Mode ───────────────────────────────────────── */
+.rating-page {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 1rem 1rem 3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.rating-progress-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border) 80%, transparent);
+  overflow: hidden;
+}
+
+.rating-progress-bar > span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #fbbf24);
+  border-radius: inherit;
+  transition: width 0.25s ease;
+}
+
+.rating-progress-label {
+  margin: 0;
+  text-align: center;
+}
+
+.rating-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.65rem;
+  padding: 1.25rem 1.1rem 1.4rem;
+}
+
+.rating-cover {
+  position: relative;
+  width: min(280px, 70vw);
+  aspect-ratio: 1;
+  border-radius: 1rem;
+  overflow: hidden;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+}
+
+.rating-art {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.rating-art-fallback {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  background: var(--accent-soft);
+  font-size: 3rem;
+}
+
+.rating-yt-host {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.rating-play {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 4rem;
+  height: 4rem;
+  border-radius: 999px;
+  border: none;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 1.25rem;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  transition: transform 0.15s, background 0.15s;
+}
+
+.rating-play:hover {
+  transform: scale(1.06);
+  background: rgba(0, 0, 0, 0.7);
+}
+
+.rating-title {
+  margin: 0.35rem 0 0;
+  font-size: 1.35rem;
+  line-height: 1.25;
+  max-width: 100%;
+}
+
+.rating-artists {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.rating-score-block {
+  margin: 0.4rem 0 0.15rem;
+}
+
+.rating-big {
+  margin: 0;
+  font-size: 3.25rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  background: linear-gradient(135deg, #fbbf24, var(--accent, #a78bfa));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.rating-num-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.35rem;
+  width: 100%;
+  max-width: 28rem;
+}
+
+.rating-num-btn {
+  width: 2.35rem;
+  height: 2.35rem;
+  padding: 0;
+  border-radius: 0.55rem;
+  border: 1.5px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 700;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s, transform 0.12s;
+}
+
+.rating-num-btn:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.rating-num-btn.is-active {
+  border-color: #fbbf24;
+  background: color-mix(in srgb, #fbbf24 22%, var(--bg));
+  box-shadow: 0 0 0 1px color-mix(in srgb, #fbbf24 40%, transparent);
+}
+
+.rating-fine {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  max-width: 28rem;
+  margin-top: 0.25rem;
+}
+
+.rating-fine input[type='range'] {
+  flex: 1;
+  min-width: 0;
+  accent-color: #fbbf24;
+}
+
+.rating-actions {
+  width: 100%;
+  justify-content: center;
+  margin-top: 0.5rem;
+}
+
+.rating-actions #rating-next {
+  min-width: 9rem;
+}
+
+.rating-quit {
+  margin-top: 0.15rem;
+  opacity: 0.85;
+}
+
+/* Results grid */
+.rating-results-page {
+  max-width: 960px;
+}
+
+.rating-results-header {
+  text-align: center;
+  padding: 1.1rem 1.25rem;
+}
+
+.rating-results-header h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.35rem;
+}
+
+.rating-results-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.85rem;
+}
+
+.rating-result-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  animation: ratingPop 0.4s ease both;
+  animation-delay: var(--rank-delay, 0ms);
+}
+
+@keyframes ratingPop {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.rating-result-art {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 0.85rem;
+  overflow: hidden;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
+  background: var(--surface);
+}
+
+.rating-result-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.rating-result-fallback {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  font-size: 2rem;
+  background: var(--accent-soft);
+}
+
+.rating-result-badge {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: clamp(1.6rem, 4vw, 2.4rem);
+  font-weight: 800;
+  color: #fff;
+  text-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.85),
+    0 0 24px rgba(0, 0, 0, 0.5);
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.15) 0%,
+    rgba(0, 0, 0, 0.45) 100%
+  );
+  letter-spacing: -0.02em;
+}
+
+.rating-result-rank {
+  position: absolute;
+  top: 0.4rem;
+  left: 0.4rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.15rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  z-index: 1;
+}
+
+.rating-result-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.rating-result-name {
+  font-size: 0.85rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rating-result-artists {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rating-results-actions {
+  justify-content: center;
+  margin-top: 0.5rem;
+}
+
+@media (max-width: 540px) {
+  .rating-num-btn {
+    width: 2.1rem;
+    height: 2.1rem;
+    font-size: 0.8rem;
+  }
+  .rating-big {
+    font-size: 2.75rem;
+  }
+  .rating-results-grid {
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  }
+}
+
 .party-shell .brand-sub {
   text-align: center;
   color: var(--muted);
