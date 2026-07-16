@@ -22,51 +22,8 @@ const isProd = process.env.NODE_ENV === 'production';
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Render (and similar hosts) sit in front of Node as a reverse proxy.
-// trust proxy makes req.ip use X-Forwarded-For so we see the visitor, not Render.
-app.set('trust proxy', 1);
-
 app.use(cors());
 app.use(express.json({ limit: '32kb' }));
-
-/**
- * Best-effort real visitor IP.
- * On Render, the browser → Render edge → your app, so the direct connection
- * is often a proxy. The original client is usually first in X-Forwarded-For.
- */
-function clientIp(req) {
-  const xf = req.headers['x-forwarded-for'];
-  if (typeof xf === 'string' && xf.trim()) {
-    return xf.split(',')[0].trim();
-  }
-  if (Array.isArray(xf) && xf[0]) {
-    return String(xf[0]).split(',')[0].trim();
-  }
-  return req.ip || req.socket?.remoteAddress || 'unknown';
-}
-
-/** Paths we never log (health pings, etc.). */
-const SKIP_VISIT_LOG = new Set(['/api/health']);
-
-/** Static file extensions — logging every JS/CSS chunk would flood the logs. */
-const STATIC_EXT =
-  /\.(js|css|map|svg|png|jpe?g|gif|webp|ico|woff2?|ttf|eot|mp3|mp4|webm)$/i;
-
-/**
- * Option B visitor log: prints IP + method + path to stdout.
- * On Render → Dashboard → your service → Logs, search for "[visit]".
- * Does not store IPs in a database; lines age out with Render log retention.
- */
-app.use((req, res, next) => {
-  const pathOnly = req.path || '/';
-  if (SKIP_VISIT_LOG.has(pathOnly) || STATIC_EXT.test(pathOnly)) {
-    return next();
-  }
-  console.log(
-    `[visit] ${new Date().toISOString()} ip=${clientIp(req)} ${req.method} ${pathOnly}`
-  );
-  next();
-});
 
 app.get('/api/health', (_req, res) => {
   res.json({
