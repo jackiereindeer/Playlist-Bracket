@@ -283,10 +283,231 @@ button.ghost:hover:not(:disabled) {
   font-weight: 500;
 }
 
+.setup-page {
+  width: 100%;
+}
+
+.setup-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: 1.5rem;
+  align-items: stretch;
+}
+
+.setup-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.setup-kicker {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.setup-title {
+  margin: 0;
+  font-size: clamp(1.45rem, 3.2vw, 1.9rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+  color: var(--text);
+}
+
+.setup-lead {
+  margin: 0 0 0.5rem;
+  color: var(--muted);
+  font-size: 0.98rem;
+  line-height: 1.55;
+  max-width: 36ch;
+}
+
+.setup-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.setup-aside {
+  min-height: 100%;
+}
+
+.setup-visual {
+  height: 100%;
+  min-height: 420px;
+  border-radius: calc(var(--radius) + 4px);
+  border: 1.5px solid var(--border);
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 0%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 60%),
+    linear-gradient(165deg, color-mix(in srgb, var(--surface) 92%, #fff) 0%, var(--bg) 100%);
+  box-shadow: var(--shadow);
+  padding: 1.5rem 1.25rem 1.35rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 1.5rem;
+  overflow: hidden;
+  position: relative;
+}
+
+.setup-visual::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--border) 55%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--border) 55%, transparent) 1px, transparent 1px);
+  background-size: 28px 28px;
+  mask-image: radial-gradient(ellipse 70% 70% at 50% 35%, #000 20%, transparent 75%);
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.bracket-sketch {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 1fr 0.85fr 0.7fr 0.85fr 1fr;
+  gap: 0.65rem;
+  align-items: center;
+  min-height: 200px;
+  padding: 0.5rem 0.25rem;
+}
+
+.sketch-col {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
+  align-items: center;
+  gap: 0.75rem;
+  height: 200px;
+  position: relative;
+}
+
+.sketch-col::before {
+  content: '';
+  position: absolute;
+  top: 12%;
+  bottom: 12%;
+  width: 1px;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in srgb, var(--accent) 35%, var(--border)),
+    transparent
+  );
+  opacity: 0.7;
+}
+
+.sketch-node {
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  background: color-mix(in srgb, var(--surface) 70%, var(--bg));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+  position: relative;
+  z-index: 1;
+}
+
+.sketch-mid .sketch-node {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+}
+
+.sketch-champ {
+  width: 58px !important;
+  height: 58px !important;
+  border-radius: 14px !important;
+  border-color: var(--accent) !important;
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface)) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent),
+    0 10px 28px color-mix(in srgb, var(--accent) 22%, transparent) !important;
+}
+
+.setup-steps {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  border-top: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  padding-top: 1.1rem;
+}
+
+.setup-step {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.85rem;
+  align-items: start;
+}
+
+.setup-step-num {
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: color-mix(in srgb, var(--accent) 75%, var(--muted));
+  padding-top: 0.15rem;
+}
+
+.setup-step strong {
+  display: block;
+  font-size: 0.92rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.setup-step p {
+  margin: 0.15rem 0 0;
+  font-size: 0.84rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
 .setup-form {
   display: flex;
   flex-direction: column;
   gap: 1.35rem;
+  margin-top: 0.35rem;
+}
+
+@media (max-width: 860px) {
+  .setup-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .setup-visual {
+    min-height: 0;
+  }
+
+  .bracket-sketch {
+    min-height: 160px;
+  }
+
+  .sketch-col {
+    height: 160px;
+  }
+
+  .sketch-node {
+    width: 34px;
+    height: 34px;
+  }
+
+  .sketch-mid .sketch-node {
+    width: 40px;
+    height: 40px;
+  }
+
+  .sketch-champ {
+    width: 48px !important;
+    height: 48px !important;
+  }
 }
 
 .field label {
