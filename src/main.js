@@ -50,6 +50,23 @@ let roundTransition = null;
 let transitionTimer = null;
 let saveTimer = null;
 
+/**
+ * Solo pre-tournament roster (after load playlist / add songs).
+ * @type {null | {
+ *   meta: object,
+ *   tracks: object[],
+ *   selected: Set<string>,
+ *   seeding: 'order'|'shuffle',
+ *   loadUrl: string,
+ *   addUrl: string,
+ *   busy: string,
+ *   note: string,
+ * }}
+ */
+let setupDraft = null;
+/** Remember last paste on “Different playlist” so the load form isn’t empty. */
+let lastSetupUrl = '';
+
 /** home = mode pick · solo = original local game · party = multiplayer (local WS) */
 let uiMode = 'home';
 /** @type {{ destroy: () => void } | null} */
@@ -1274,11 +1291,11 @@ function render() {
   const gen = renderGeneration;
   document.body.classList.remove('on-setup');
 
-  if (loading) {
+  if (loading && !setupDraft) {
     clearStageVibe();
     app.innerHTML = `
       ${brandHeaderHtml()}
-      <div class="card loading"><div class="spinner"></div> Loading your bracket…</div>
+      <div class="card loading"><div class="spinner"></div> Loading playlist…</div>
     `;
     return;
   }
@@ -1329,70 +1346,75 @@ function render() {
   renderHome();
 }
 
+function setupBgHtml() {
+  return `
+    <div class="setup-bg" aria-hidden="true">
+      <span class="blob blob-a"></span>
+      <span class="blob blob-b"></span>
+      <span class="blob blob-c"></span>
+      <span class="blob blob-d"></span>
+      <span class="swirl swirl-a"></span>
+      <span class="swirl swirl-b"></span>
+      <span class="swirl swirl-c"></span>
+      <span class="shape shape-ring"></span>
+      <span class="shape shape-dot-a"></span>
+      <span class="shape shape-dot-b"></span>
+      <span class="shape shape-dot-c"></span>
+      <span class="shape shape-bar"></span>
+      <span class="shape shape-arc"></span>
+    </div>
+  `;
+}
+
+function clearSetupDraft() {
+  setupDraft = null;
+}
+
+function selectedCount(draft = setupDraft) {
+  if (!draft?.selected) return 0;
+  return draft.selected.size;
+}
+
 function renderSetup() {
   document.body.classList.add('on-setup');
+  if (setupDraft && Array.isArray(setupDraft.tracks) && setupDraft.tracks.length > 0) {
+    renderSetupRoster();
+    return;
+  }
+  renderSetupLoad();
+}
+
+function renderSetupLoad() {
   app.innerHTML = `
     <div class="setup-page">
-      <div class="setup-bg" aria-hidden="true">
-        <span class="blob blob-a"></span>
-        <span class="blob blob-b"></span>
-        <span class="blob blob-c"></span>
-        <span class="blob blob-d"></span>
-        <span class="swirl swirl-a"></span>
-        <span class="swirl swirl-b"></span>
-        <span class="swirl swirl-c"></span>
-        <span class="shape shape-ring"></span>
-        <span class="shape shape-dot-a"></span>
-        <span class="shape shape-dot-b"></span>
-        <span class="shape shape-dot-c"></span>
-        <span class="shape shape-bar"></span>
-        <span class="shape shape-arc"></span>
-      </div>
-
+      ${setupBgHtml()}
       ${brandHeaderHtml()}
 
       <div class="card setup-card">
-        <form class="setup-form" id="setup-form">
+        <form class="setup-form" id="setup-load-form">
           <div class="field">
-            <label for="playlist-url">Playlist link</label>
+            <label for="playlist-url">Playlist or song link</label>
             <input
               id="playlist-url"
               name="url"
               type="url"
-              placeholder="Spotify or YouTube playlist URL…"
+              placeholder="Spotify / YouTube playlist, or Spotify song…"
               required
               autocomplete="off"
+              value="${escapeHtml(lastSetupUrl || '')}"
             />
-          </div>
-
-          <div class="field">
-            <label>Matchup order</label>
-            <div class="seed-options">
-              <div class="seed-option">
-                <input type="radio" name="seeding" id="seed-order" value="order" checked />
-                <label for="seed-order">
-                  Playlist order
-                  <span>1st vs 2nd, 3rd vs 4th…</span>
-                </label>
-              </div>
-              <div class="seed-option">
-                <input type="radio" name="seeding" id="seed-shuffle" value="shuffle" />
-                <label for="seed-shuffle">
-                  Shuffle
-                  <span>Random matchups</span>
-                </label>
-              </div>
-            </div>
           </div>
 
           ${
             error
               ? `<div class="error-box" role="alert">${escapeHtml(error)}</div>`
-              : `<p class="setup-note">Paste a public Spotify or YouTube playlist link.</p>`
+              : `<p class="setup-note">Load a public playlist — then pick which songs enter the bracket, or add more songs by link.</p>`
           }
 
           <div class="form-actions">
-            <button type="submit" id="start-btn">Start tournament</button>
+            <button type="submit" id="load-playlist-btn" ${loading ? 'disabled' : ''}>
+              ${loading ? 'Loading…' : 'Load songs'}
+            </button>
             <button type="button" class="ghost" id="solo-back-home">Back to menu</button>
           </div>
         </form>
@@ -1400,12 +1422,421 @@ function renderSetup() {
     </div>
   `;
 
-  document.getElementById('setup-form')?.addEventListener('submit', onStart);
+  document.getElementById('setup-load-form')?.addEventListener('submit', onLoadPlaylist);
   document.getElementById('solo-back-home')?.addEventListener('click', () => {
+    clearSetupDraft();
+    error = '';
     uiMode = 'home';
+    render();
+  });
+}
+
+function renderSetupRoster() {
+  const draft = setupDraft;
+  if (!draft) return renderSetupLoad();
+
+  const total = draft.tracks.length;
+  const included = selectedCount(draft);
+  const busy = Boolean(draft.busy);
+  const metaName = draft.meta?.name || 'Your songs';
+  const metaImg = draft.meta?.image
+    ? `<img class="roster-meta-art" src="${escapeHtml(draft.meta.image)}" alt="" />`
+    : `<div class="roster-meta-art roster-meta-art-fallback" aria-hidden="true">🎵</div>`;
+
+  const rows = draft.tracks
+    .map((song, idx) => {
+      const on = draft.selected.has(song.id);
+      const art = song.image
+        ? `<img class="roster-row-art" src="${escapeHtml(song.image)}" alt="" loading="lazy" />`
+        : `<span class="roster-row-art roster-row-art-fallback" aria-hidden="true">♪</span>`;
+      return `
+        <label class="roster-row ${on ? 'is-on' : 'is-off'}" data-track-id="${escapeHtml(song.id)}">
+          <input
+            type="checkbox"
+            class="roster-check"
+            data-track-id="${escapeHtml(song.id)}"
+            ${on ? 'checked' : ''}
+            ${busy ? 'disabled' : ''}
+          />
+          <span class="roster-check-ui" aria-hidden="true"></span>
+          ${art}
+          <span class="roster-row-text">
+            <span class="roster-row-name">${escapeHtml(song.name || 'Unknown')}</span>
+            <span class="roster-row-artists">${escapeHtml(song.artists || '')}</span>
+          </span>
+          <span class="roster-row-idx muted small">${idx + 1}</span>
+        </label>
+      `;
+    })
+    .join('');
+
+  app.innerHTML = `
+    <div class="setup-page setup-page-roster">
+      ${setupBgHtml()}
+      ${brandHeaderHtml()}
+
+      <div class="card setup-card setup-card-roster">
+        <header class="roster-header">
+          ${metaImg}
+          <div class="roster-header-text">
+            <h2 class="roster-title">${escapeHtml(metaName)}</h2>
+            <p class="roster-sub muted small">
+              <strong id="roster-count">${included}</strong> of ${total} in the bracket
+              ${
+                draft.meta?.owner
+                  ? ` · ${escapeHtml(String(draft.meta.owner))}`
+                  : ''
+              }
+            </p>
+          </div>
+        </header>
+
+        <div class="roster-toolbar">
+          <button type="button" class="ghost small-btn" id="roster-all" ${busy ? 'disabled' : ''}>Select all</button>
+          <button type="button" class="ghost small-btn" id="roster-none" ${busy ? 'disabled' : ''}>Select none</button>
+          <button type="button" class="ghost small-btn" id="roster-invert" ${busy ? 'disabled' : ''}>Invert</button>
+          <button type="button" class="ghost small-btn" id="roster-reload" ${busy ? 'disabled' : ''}>Different playlist</button>
+        </div>
+
+        <div class="roster-list" id="roster-list" role="list">${rows}</div>
+
+        <div class="field roster-add-field">
+          <label for="add-song-url">Add a song by link</label>
+          <div class="roster-add-row">
+            <input
+              id="add-song-url"
+              type="url"
+              placeholder="Paste Spotify song link…"
+              autocomplete="off"
+              value="${escapeHtml(draft.addUrl || '')}"
+              ${busy ? 'disabled' : ''}
+            />
+            <button type="button" id="add-song-btn" ${busy ? 'disabled' : ''}>
+              ${draft.busy === 'add' ? 'Adding…' : 'Add'}
+            </button>
+          </div>
+          <p class="setup-note">Uncheck a song to leave it out of the tournament.</p>
+        </div>
+
+        <div class="field">
+          <label>Matchup order</label>
+          <div class="seed-options">
+            <div class="seed-option">
+              <input type="radio" name="seeding" id="seed-order" value="order" ${
+                draft.seeding !== 'shuffle' ? 'checked' : ''
+              } ${busy ? 'disabled' : ''} />
+              <label for="seed-order">
+                Playlist order
+                <span>1st vs 2nd, 3rd vs 4th…</span>
+              </label>
+            </div>
+            <div class="seed-option">
+              <input type="radio" name="seeding" id="seed-shuffle" value="shuffle" ${
+                draft.seeding === 'shuffle' ? 'checked' : ''
+              } ${busy ? 'disabled' : ''} />
+              <label for="seed-shuffle">
+                Shuffle
+                <span>Random matchups</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        ${
+          error
+            ? `<div class="error-box" role="alert">${escapeHtml(error)}</div>`
+            : draft.note
+              ? `<p class="setup-note roster-note">${escapeHtml(draft.note)}</p>`
+              : ''
+        }
+
+        <div class="form-actions">
+          <button type="button" id="start-btn" ${busy || included < 2 ? 'disabled' : ''}>
+            ${busy && draft.busy === 'start' ? 'Starting…' : `Start tournament (${included})`}
+          </button>
+          <button type="button" class="ghost" id="solo-back-home" ${busy ? 'disabled' : ''}>Back to menu</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  wireSetupRoster();
+}
+
+function updateRosterCountUi() {
+  const el = document.getElementById('roster-count');
+  if (el && setupDraft) el.textContent = String(selectedCount());
+  const start = document.getElementById('start-btn');
+  if (start && setupDraft) {
+    const n = selectedCount();
+    start.disabled = Boolean(setupDraft.busy) || n < 2;
+    start.textContent =
+      setupDraft.busy === 'start' ? 'Starting…' : `Start tournament (${n})`;
+  }
+}
+
+function wireSetupRoster() {
+  const list = document.getElementById('roster-list');
+  list?.addEventListener('change', (e) => {
+    const t = e.target;
+    if (!(t instanceof HTMLInputElement) || !t.classList.contains('roster-check')) return;
+    if (!setupDraft) return;
+    const id = t.getAttribute('data-track-id');
+    if (!id) return;
+    if (t.checked) setupDraft.selected.add(id);
+    else setupDraft.selected.delete(id);
+    const row = t.closest('.roster-row');
+    if (row) {
+      row.classList.toggle('is-on', t.checked);
+      row.classList.toggle('is-off', !t.checked);
+    }
+    error = '';
+    updateRosterCountUi();
+  });
+
+  document.getElementById('roster-all')?.addEventListener('click', () => {
+    if (!setupDraft) return;
+    for (const s of setupDraft.tracks) setupDraft.selected.add(s.id);
+    render();
+  });
+  document.getElementById('roster-none')?.addEventListener('click', () => {
+    if (!setupDraft) return;
+    setupDraft.selected.clear();
+    render();
+  });
+  document.getElementById('roster-invert')?.addEventListener('click', () => {
+    if (!setupDraft) return;
+    for (const s of setupDraft.tracks) {
+      if (setupDraft.selected.has(s.id)) setupDraft.selected.delete(s.id);
+      else setupDraft.selected.add(s.id);
+    }
+    render();
+  });
+  document.getElementById('roster-reload')?.addEventListener('click', () => {
+    lastSetupUrl = setupDraft?.loadUrl || lastSetupUrl;
+    clearSetupDraft();
     error = '';
     render();
   });
+
+  document.querySelectorAll('input[name="seeding"]').forEach((el) => {
+    el.addEventListener('change', () => {
+      if (!setupDraft) return;
+      setupDraft.seeding = el.value === 'shuffle' ? 'shuffle' : 'order';
+    });
+  });
+
+  const addInput = document.getElementById('add-song-url');
+  addInput?.addEventListener('input', () => {
+    if (setupDraft) setupDraft.addUrl = addInput.value;
+  });
+  addInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      onAddSongToDraft();
+    }
+  });
+  document.getElementById('add-song-btn')?.addEventListener('click', () => onAddSongToDraft());
+  document.getElementById('start-btn')?.addEventListener('click', () => onStartFromDraft());
+  document.getElementById('solo-back-home')?.addEventListener('click', () => {
+    clearSetupDraft();
+    error = '';
+    uiMode = 'home';
+    render();
+  });
+}
+
+/**
+ * Load playlist (or first song) into the roster editor — does not start the tournament yet.
+ */
+async function onLoadPlaylist(e) {
+  e.preventDefault();
+  error = '';
+  const form = e.target;
+  const url = form.url?.value?.trim?.() || '';
+  if (!url) {
+    error = 'Paste a public Spotify or YouTube playlist link (or a Spotify song).';
+    render();
+    return;
+  }
+
+  loadGeneration += 1;
+  const myLoad = loadGeneration;
+  loading = true;
+  render();
+
+  try {
+    const res = await fetch(`/api/playlist?url=${encodeURIComponent(url)}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || `Failed to load (${res.status})`);
+    }
+    if (myLoad !== loadGeneration) return;
+
+    const tracks = Array.isArray(data.tracks) ? data.tracks.filter(isSongLike) : [];
+    if (tracks.length < 1) {
+      throw new Error('No playable songs found.');
+    }
+
+    // Dedupe by id while keeping order
+    const seen = new Set();
+    const unique = [];
+    for (const t of tracks) {
+      if (seen.has(t.id)) continue;
+      seen.add(t.id);
+      unique.push(t);
+    }
+
+    const selected = new Set(unique.map((t) => t.id));
+    lastSetupUrl = url;
+    setupDraft = {
+      meta: {
+        id: data.id || 'custom',
+        name: data.name || 'Playlist',
+        description: data.description || '',
+        image: data.image || unique[0]?.image || null,
+        owner: data.owner || '',
+        spotifyUrl: data.spotifyUrl || null,
+        source: data.source || 'spotify',
+      },
+      tracks: unique,
+      selected,
+      seeding: 'order',
+      loadUrl: url,
+      addUrl: '',
+      busy: '',
+      note:
+        unique.length === 1
+          ? 'One song loaded — add more with links below, or load a playlist.'
+          : `Loaded ${unique.length} songs. Uncheck any you want out.`,
+    };
+    error = '';
+  } catch (err) {
+    if (myLoad !== loadGeneration) return;
+    error = err.message || 'Could not load playlist.';
+    clearSetupDraft();
+  } finally {
+    if (myLoad !== loadGeneration) return;
+    loading = false;
+    render();
+  }
+}
+
+async function onAddSongToDraft() {
+  if (!setupDraft || setupDraft.busy) return;
+  error = '';
+  const input = document.getElementById('add-song-url');
+  const url = (input?.value || setupDraft.addUrl || '').trim();
+  if (!url) {
+    error = 'Paste a Spotify song link to add.';
+    render();
+    return;
+  }
+
+  setupDraft.busy = 'add';
+  setupDraft.addUrl = url;
+  setupDraft.note = '';
+  render();
+
+  try {
+    const res = await fetch(`/api/track?url=${encodeURIComponent(url)}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || `Could not add song (${res.status})`);
+    }
+    if (!isSongLike(data)) {
+      throw new Error('That link did not return a playable song.');
+    }
+    if (setupDraft.tracks.some((t) => t.id === data.id)) {
+      setupDraft.selected.add(data.id);
+      setupDraft.note = `"${data.name}" is already in the list (kept selected).`;
+      setupDraft.addUrl = '';
+      return;
+    }
+    setupDraft.tracks.push({
+      id: data.id,
+      name: data.name,
+      artists: data.artists || '',
+      image: data.image || null,
+      source: data.source || 'spotify',
+      spotifyUrl: data.spotifyUrl || null,
+      embedUrl: data.embedUrl || null,
+    });
+    setupDraft.selected.add(data.id);
+    setupDraft.addUrl = '';
+    setupDraft.note = `Added “${data.name}”.`;
+    // Scroll list to bottom after paint
+    requestAnimationFrame(() => {
+      const list = document.getElementById('roster-list');
+      if (list) list.scrollTop = list.scrollHeight;
+    });
+  } catch (err) {
+    error = err.message || 'Could not add that song.';
+  } finally {
+    if (setupDraft) setupDraft.busy = '';
+    render();
+  }
+}
+
+/**
+ * Start the tournament from the curated roster (selected songs only).
+ */
+function onStartFromDraft() {
+  if (!setupDraft || setupDraft.busy) return;
+  error = '';
+
+  const seedingEl = document.querySelector('input[name="seeding"]:checked');
+  const seeding =
+    seedingEl?.value === 'shuffle' || setupDraft.seeding === 'shuffle'
+      ? 'shuffle'
+      : 'order';
+  setupDraft.seeding = seeding;
+
+  const tracks = setupDraft.tracks.filter((t) => setupDraft.selected.has(t.id) && isSongLike(t));
+  if (tracks.length < 2) {
+    error = 'Pick at least 2 songs for the tournament.';
+    render();
+    return;
+  }
+
+  loadGeneration += 1;
+  clearTransitionTimer();
+  roundTransition = null;
+  matchWinBeat = null;
+  fadingAudio.clear();
+  disposeMedia({ removeTransition: true });
+  stopChampionBed();
+  clearPreviewCache();
+  clearUndoStack();
+  clearTrackVolumes();
+  transitionSongIndex = 0;
+
+  const meta = {
+    id: setupDraft.meta?.id || 'custom',
+    name: setupDraft.meta?.name || 'Custom bracket',
+    description: setupDraft.meta?.description || '',
+    image: setupDraft.meta?.image || tracks[0]?.image || null,
+    owner: setupDraft.meta?.owner || '',
+    spotifyUrl: setupDraft.meta?.spotifyUrl || null,
+    source: setupDraft.meta?.source || tracks[0]?.source || 'spotify',
+    tracks, // createTournament may ignore; keep for consistency
+  };
+
+  try {
+    playlistTracks = tracks;
+    state = createTournament(meta, tracks, seeding);
+    if (meta.source === 'youtube' || tracks.some(isYouTubeTrack)) {
+      loadYouTubeApi().catch(() => {});
+    }
+    saveProgress({ immediate: true });
+    clearSetupDraft();
+    error = '';
+  } catch (err) {
+    error = err.message || 'Could not start tournament.';
+    state = null;
+    playlistTracks = [];
+  }
+  render();
 }
 
 /** Top-left toggle during solo play — skip full-screen win beat between matches. */
@@ -2685,72 +3116,7 @@ function buildBracketHtml(history, champion) {
   `;
 }
 
-async function onStart(e) {
-  e.preventDefault();
-  error = '';
-  const form = e.target;
-  const url = form.url?.value?.trim?.() || '';
-  const seeding = form.seeding?.value === 'shuffle' ? 'shuffle' : 'order';
-  if (!url) {
-    error = 'Paste a public Spotify or YouTube playlist link.';
-    render();
-    return;
-  }
-
-  loadGeneration += 1;
-  const myLoad = loadGeneration;
-
-  clearTransitionTimer();
-  roundTransition = null;
-  fadingAudio.clear();
-  disposeMedia({ removeTransition: true });
-  stopChampionBed();
-  clearPreviewCache();
-  clearUndoStack();
-  state = null;
-  playlistTracks = [];
-  transitionSongIndex = 0;
-  clearTrackVolumes();
-
-  loading = true;
-  render();
-
-  try {
-    const res = await fetch(`/api/playlist?url=${encodeURIComponent(url)}`);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      throw new Error(data.error || `Failed to load playlist (${res.status})`);
-    }
-    if (myLoad !== loadGeneration) return;
-
-    const tracks = Array.isArray(data.tracks) ? data.tracks.filter(isSongLike) : [];
-    if (tracks.length < 2) {
-      throw new Error('Need at least 2 playable songs in the playlist to run a tournament.');
-    }
-
-    playlistTracks = tracks;
-    transitionSongIndex = 0;
-    clearTrackVolumes();
-    state = createTournament(data, tracks, seeding);
-    // Warm YouTube API early when needed
-    if (data.source === 'youtube' || tracks.some(isYouTubeTrack)) {
-      loadYouTubeApi().catch(() => {});
-    }
-    saveProgress({ immediate: true });
-  } catch (err) {
-    if (myLoad !== loadGeneration) return;
-    error = err.message || 'Could not start tournament.';
-    state = null;
-    playlistTracks = [];
-    transitionSongIndex = 0;
-    clearTrackVolumes();
-    clearSavedProgress();
-  } finally {
-    if (myLoad !== loadGeneration) return;
-    loading = false;
-    render();
-  }
-}
+// Solo start path is onLoadPlaylist → roster → onStartFromDraft (see setupDraft).
 
 /** Save a restore-point before changing the bracket (used by Undo). */
 function pushUndoSnapshot() {
@@ -2887,6 +3253,7 @@ function onQuit() {
   clearPreviewCache();
   clearSavedProgress();
   clearUndoStack();
+  clearSetupDraft();
   state = null;
   playlistTracks = [];
   transitionSongIndex = 0;

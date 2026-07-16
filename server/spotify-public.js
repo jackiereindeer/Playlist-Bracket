@@ -26,6 +26,10 @@ function extractPlaylistId(input) {
     const host = url.hostname.replace(/^www\./, '');
     if (host === 'open.spotify.com' || host === 'spotify.link' || host === 'embed.spotify.com') {
       const parts = url.pathname.split('/').filter(Boolean);
+      // Don't treat track/album/artist URLs as playlists
+      if (parts[0] === 'track' || parts[0] === 'album' || parts[0] === 'artist') {
+        return null;
+      }
       const playlistIdx = parts.indexOf('playlist');
       if (playlistIdx !== -1 && parts[playlistIdx + 1]) {
         return parts[playlistIdx + 1].split('?')[0];
@@ -33,6 +37,31 @@ function extractPlaylistId(input) {
     }
   } catch {
 
+  }
+
+  if (/^[a-zA-Z0-9]{22}$/.test(trimmed)) return trimmed;
+  return null;
+}
+
+/** Spotify track id from open.spotify.com/track/…, spotify:track:…, or bare 22-char id. */
+function extractTrackId(input) {
+  if (!input || typeof input !== 'string') return null;
+  const trimmed = input.trim();
+
+  const uriMatch = trimmed.match(/^spotify:track:([a-zA-Z0-9]+)$/i);
+  if (uriMatch) return uriMatch[1];
+
+  try {
+    const url = new URL(trimmed);
+    const host = url.hostname.replace(/^www\./, '');
+    if (host === 'open.spotify.com' || host === 'spotify.link' || host === 'embed.spotify.com') {
+      const parts = url.pathname.split('/').filter(Boolean);
+      const trackIdx = parts.indexOf('track');
+      if (trackIdx !== -1 && parts[trackIdx + 1]) {
+        return parts[trackIdx + 1].split('?')[0];
+      }
+    }
+  } catch {
   }
 
   if (/^[a-zA-Z0-9]{22}$/.test(trimmed)) return trimmed;
@@ -457,10 +486,79 @@ async function fetchTrackPreview(trackId) {
   throw lastErr || new Error('No preview available for this track.');
 }
 
+/**
+ * Full public track metadata for solo "add song" (no OAuth).
+ * Uses the embed page the same way previews do.
+ */
+async function fetchPublicTrack(trackId) {
+  const id = String(trackId || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 64);
+  if (!id) {
+    const err = new Error('Invalid track id.');
+    err.status = 400;
+    throw err;
+  }
+
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      if (attempt > 0) {
+        cookieJar = '';
+        cookieJarAt = 0;
+        await new Promise((r) => setTimeout(r, 250 * attempt));
+      }
+      const html = await fetchEmbedHtml('track', id);
+      const next = parseNextData(html);
+      const entity = next?.props?.pageProps?.state?.data?.entity;
+
+      if (!entity || (entity.entityType && entity.entityType !== 'track' && entity.type !== 'track')) {
+        // Some embeds omit entityType but still have title
+        if (!entity?.title && !entity?.name) {
+          const err = new Error(
+            'Track not found. It may be region-blocked or the link is wrong.'
+          );
+          err.status = 404;
+          throw err;
+        }
+      }
+
+      const cover =
+        entity?.coverArt?.sources?.find((s) => s?.width >= 300)?.url ||
+        entity?.coverArt?.sources?.[0]?.url ||
+        entity?.visualIdentity?.image?.[0]?.url ||
+        null;
+
+      const artists = String(
+        entity?.subtitle ||
+          entity?.artists?.[0]?.name ||
+          entity?.artistName ||
+          'Unknown artist'
+      )
+        .replace(/\u00a0/g, ' ')
+        .trim();
+
+      return {
+        id,
+        name: entity?.title || entity?.name || 'Unknown track',
+        artists,
+        image: cover,
+        source: 'spotify',
+        spotifyUrl: `https://open.spotify.com/track/${id}`,
+        embedUrl: `https://open.spotify.com/embed/track/${id}?utm_source=generator&theme=0`,
+      };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  throw lastErr || new Error('Could not load that track.');
+}
+
 export {
   extractPlaylistId,
+  extractTrackId,
   fetchPublicPlaylist,
   fetchPlaylistViaPathfinder,
   fetchPlaylistViaEmbed,
+  fetchPublicTrack,
   fetchTrackPreview,
 };

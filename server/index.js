@@ -5,7 +5,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import {
   extractPlaylistId,
+  extractTrackId,
   fetchPublicPlaylist,
+  fetchPublicTrack,
   fetchTrackPreview,
 } from './spotify-public.js';
 import {
@@ -54,20 +56,46 @@ app.get('/api/playlist', async (req, res) => {
       return res.json(playlist);
     }
 
+    // Explicit Spotify track URL / URI → one-song list (solo roster can add more).
+    // Bare 22-char ids stay playlist-first (ambiguous with track ids).
+    const looksLikeTrackUrl =
+      /open\.spotify\.com\/track\//i.test(raw) ||
+      /^spotify:track:/i.test(raw.trim());
+    if (looksLikeTrackUrl) {
+      const trackId = extractTrackId(raw);
+      if (trackId) {
+        const track = await fetchPublicTrack(trackId);
+        const playlist = {
+          id: track.id,
+          name: track.name || 'Track',
+          description: '',
+          image: track.image || null,
+          owner: track.artists || '',
+          spotifyUrl: track.spotifyUrl,
+          source: 'spotify',
+          tracks: [{ ...track, source: 'spotify' }],
+        };
+        res.set('Cache-Control', 'private, max-age=60');
+        return res.json(playlist);
+      }
+    }
+
     // Spotify playlist
     const playlistId = extractPlaylistId(raw);
     if (!playlistId) {
       return res.status(400).json({
         error:
-          'Invalid playlist link. Paste a public Spotify or YouTube playlist URL.',
+          'Invalid link. Paste a public Spotify/YouTube playlist, or a Spotify song link.',
       });
     }
 
     const playlist = await fetchPublicPlaylist(playlistId);
 
-    if (!playlist?.tracks || playlist.tracks.length < 2) {
+    // Solo can load any size and curate; party still needs enough after host edits.
+    // Allow 1+ so a single-track start + add-songs works.
+    if (!playlist?.tracks || playlist.tracks.length < 1) {
       return res.status(400).json({
-        error: 'Need at least 2 playable songs in the playlist to run a tournament.',
+        error: 'No playable songs found in that playlist.',
       });
     }
 
@@ -83,6 +111,29 @@ app.get('/api/playlist', async (req, res) => {
     console.error('[api/playlist]', err.message, err.code || '', err.details || '');
     res.status(err.status || 500).json({
       error: err.message || 'Something went wrong loading the playlist.',
+      code: err.code || undefined,
+    });
+  }
+});
+
+/** Single Spotify track metadata (solo “add song” by link). */
+app.get('/api/track', async (req, res) => {
+  try {
+    const raw = String(req.query.url || req.query.id || '').slice(0, 500);
+    const trackId = extractTrackId(raw);
+    if (!trackId) {
+      return res.status(400).json({
+        error: 'Paste a Spotify song link (open.spotify.com/track/… sp…).',
+      });
+    }
+    const track = await fetchPublicTrack(trackId);
+    track.source = track.source || 'spotify';
+    res.set('Cache-Control', 'private, max-age=120');
+    res.json(track);
+  } catch (err) {
+    console.error('[api/track]', err.message, err.code || '');
+    res.status(err.status || 500).json({
+      error: err.message || 'Could not load that song.',
       code: err.code || undefined,
     });
   }

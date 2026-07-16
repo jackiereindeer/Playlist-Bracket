@@ -597,6 +597,218 @@ body.on-setup {
   border-color: color-mix(in srgb, #fff 14%, var(--border));
 }
 
+.setup-card-roster {
+  max-width: 640px;
+}
+
+.setup-page-roster {
+  align-items: stretch;
+}
+
+/* Solo song roster — pick who enters the bracket before Start */
+.roster-header {
+  display: flex;
+  gap: 0.9rem;
+  align-items: center;
+  margin-bottom: 0.85rem;
+}
+
+.roster-meta-art {
+  width: 64px;
+  height: 64px;
+  border-radius: 12px;
+  object-fit: cover;
+  flex-shrink: 0;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+}
+
+.roster-meta-art-fallback {
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  font-size: 1.5rem;
+}
+
+.roster-title {
+  margin: 0;
+  font-size: 1.15rem;
+  line-height: 1.25;
+}
+
+.roster-sub {
+  margin: 0.25rem 0 0;
+}
+
+.roster-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.65rem;
+}
+
+.small-btn {
+  padding: 0.4rem 0.7rem !important;
+  font-size: 0.8rem !important;
+  width: auto !important;
+}
+
+.roster-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: min(42vh, 420px);
+  overflow: auto;
+  padding: 0.35rem;
+  margin: 0 0 1rem;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  scrollbar-gutter: stable;
+}
+
+.roster-row {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  align-items: center;
+  gap: 0.55rem 0.65rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, opacity 0.12s;
+  margin: 0;
+  user-select: none;
+}
+
+.roster-row:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.roster-row.is-off {
+  opacity: 0.45;
+}
+
+.roster-row.is-off .roster-row-name {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--muted) 70%, transparent);
+}
+
+.roster-check {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.roster-check-ui {
+  width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 6px;
+  border: 1.5px solid var(--border);
+  background: var(--bg);
+  flex-shrink: 0;
+  position: relative;
+  transition: border-color 0.12s, background 0.12s, box-shadow 0.12s;
+}
+
+.roster-row.is-on .roster-check-ui {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.roster-row.is-on .roster-check-ui::after {
+  content: '';
+  position: absolute;
+  left: 0.28rem;
+  top: 0.08rem;
+  width: 0.32rem;
+  height: 0.58rem;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.roster-row-art {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.roster-row-art-fallback {
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg));
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.roster-row-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.roster-row-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.roster-row-artists {
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.roster-row-idx {
+  font-variant-numeric: tabular-nums;
+  min-width: 1.5rem;
+  text-align: right;
+}
+
+.roster-add-field {
+  margin-bottom: 0.25rem;
+}
+
+.roster-add-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.roster-add-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.roster-add-row button {
+  flex-shrink: 0;
+  width: auto;
+  padding: 0.75rem 1rem;
+}
+
+.roster-note {
+  margin-top: -0.35rem;
+}
+
+@media (max-width: 540px) {
+  .roster-list {
+    max-height: min(48vh, 360px);
+  }
+  .roster-add-row {
+    flex-direction: column;
+  }
+}
+
 .setup-note {
   margin: 0;
   color: var(--muted);
