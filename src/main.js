@@ -31,6 +31,7 @@ import {
   seekYouTube,
   formatYouTubeTime,
 } from './youtube-players.js';
+import { startPartyApp, parseRoomFromUrl } from './party/party-app.js';
 
 const app = document.querySelector('#app');
 
@@ -40,6 +41,18 @@ let error = '';
 let roundTransition = null;
 let transitionTimer = null;
 let saveTimer = null;
+
+/** home = mode pick · solo = original local game · party = multiplayer (local WS) */
+let uiMode = 'home';
+/** @type {{ destroy: () => void } | null} */
+let partyHandle = null;
+
+/**
+ * Snapshots of tournament state before each pick (for Undo).
+ * Stored as serialized plain objects (same shape as localStorage saves).
+ */
+const undoStack = [];
+const MAX_UNDO = 80;
 
 /** In-flight champion bed load so we never double-set src (which restarts audio). */
 let championBedLoad = null; // { id, promise }
@@ -74,6 +87,34 @@ const MAX_CACHED_PREVIEWS = 48;
 const MAX_TRACK_VOLUMES = 200;
 
 const STORAGE_KEY = 'playlist-bracket-save-v1';
+/** Solo only: skip per-match “song won” full-screen beat (long playlists). */
+const SOLO_SKIP_WIN_BEAT_KEY = 'playlist-bracket-skip-win-beat-v1';
+const WIN_BEAT_MS = 4200;
+
+function loadSkipWinBeatPref() {
+  try {
+    return localStorage.getItem(SOLO_SKIP_WIN_BEAT_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function saveSkipWinBeatPref(on) {
+  try {
+    localStorage.setItem(SOLO_SKIP_WIN_BEAT_KEY, on ? '1' : '0');
+  } catch {
+  }
+}
+
+/** @type {boolean} solo setting — when true, go straight to next match after pick */
+let skipWinBeat = loadSkipWinBeatPref();
+
+/**
+ * Solo-only full-screen “this song won the match” beat (like party).
+ * Separate from roundTransition so disposeMedia / round logic can’t skip it.
+ * @type {{ song: object, after: null | { type: 'wave', payload: object } | { type: 'done' } } | null}
+ */
+let matchWinBeat = null;
 
 /**
  * Match <audio> players live outside #app and are reused every round.
@@ -956,12 +997,92 @@ function playAutoPreview(song, volume, gen) {
   });
 }
 
+/**
+ * Solo: show winning song full-screen (party-style), then next match or wave transition.
+ */
+function scheduleMatchWinBeat(winnerSong, after) {
+  clearTransitionTimer();
+  cancelFade('html-transition-in');
+  cancelFade('html-transition-out');
+  cancelFade('yt-transition-in');
+  cancelFade('yt-transition-out');
+  cancelAllFades();
+
+  orphanAndFadeOutMatchAudio();
+  roundTransition = null;
+  matchWinBeat = {
+    song: winnerSong,
+    after: after || null,
+  };
+
+  // Force a clean paint of the win screen (don't rely on roundTransition path)
+  renderGeneration += 1;
+  const gen = renderGeneration;
+  document.body.classList.remove('on-setup');
+  applyStageVibe(state?.remaining ?? 0);
+  renderMatchWinBeat();
+
+  // Play the winner’s preview under the art
+  if (isSongLike(winnerSong)) {
+    playAutoPreview(
+      winnerSong,
+      volumeForTrack(winnerSong.id, DEFAULT_TRANSITION_VOLUME),
+      gen
+    );
+  }
+
+  const ms = WIN_BEAT_MS;
+  const fadeLead = Math.min(FADE_OUT_MS, Math.max(0, ms - 80));
+  const fadeAt = Math.max(0, ms - fadeLead);
+
+  transitionTimer = setTimeout(() => {
+    transitionTimer = null;
+    const next = matchWinBeat?.after || null;
+    matchWinBeat = null;
+
+    fadeOutTransitionMusic().then(() => {
+      disposeMedia({ removeTransition: true });
+      if (next?.type === 'wave' && next.payload) {
+        scheduleTransition(next.payload, next.ms || 4200);
+      } else {
+        render();
+      }
+    });
+  }, fadeAt);
+}
+
+function renderMatchWinBeat() {
+  const w = matchWinBeat?.song;
+  if (!isSongLike(w)) {
+    matchWinBeat = null;
+    render();
+    return;
+  }
+  const stage = stageFromRemaining(state?.remaining ?? 0);
+  const art = w.image
+    ? `<img class="solo-win-art" src="${escapeHtml(w.image)}" alt="" />`
+    : `<div class="solo-win-art solo-win-art-fallback" aria-hidden="true">🎵</div>`;
+  app.innerHTML = `
+    ${soloWinTransitionToggleHtml()}
+    <div class="solo-win-beat party-winner-full stage-${escapeHtml(stage)}" role="status" aria-live="polite">
+      <div class="party-winner-full-inner solo-win-beat-inner">
+        <p class="solo-win-kicker party-winner-label">Winner</p>
+        <div class="solo-win-art-stage party-win-art-stage">${art}</div>
+        <h1 class="solo-win-title party-winner-title">${escapeHtml(w.name || '')}</h1>
+        <p class="solo-win-artists party-winner-artists">${escapeHtml(w.artists || '')}</p>
+      </div>
+    </div>
+  `;
+  wireSoloWinTransitionToggle();
+}
+
 function scheduleTransition(payload, ms) {
   clearTransitionTimer();
   cancelFade('html-transition-in');
   cancelFade('html-transition-out');
   cancelFade('yt-transition-in');
   cancelFade('yt-transition-out');
+  matchWinBeat = null;
 
   // Soften the handoff from the match into the stinger
   orphanAndFadeOutMatchAudio();
@@ -1058,7 +1179,87 @@ function silenceMatchPlayers({ removeTransition = false } = {}) {
   onMediaDisposed();
 }
 
+function enterSolo() {
+  if (partyHandle) {
+    try {
+      partyHandle.destroy();
+    } catch {
+    }
+    partyHandle = null;
+  }
+  uiMode = 'solo';
+  render();
+}
+
+function enterParty() {
+  // Party owns #app — stop solo media first
+  clearTransitionTimer();
+  roundTransition = null;
+  disposeMedia({ removeTransition: true });
+  stopChampionBed();
+  clearStageVibe();
+  if (partyHandle) {
+    try {
+      partyHandle.destroy();
+    } catch {
+    }
+  }
+  uiMode = 'party';
+  partyHandle = startPartyApp(app, {
+    onExit: () => {
+      try {
+        partyHandle?.destroy();
+      } catch {
+      }
+      partyHandle = null;
+      uiMode = 'home';
+      document.body.classList.add('on-setup');
+      render();
+    },
+  });
+}
+
+function renderHome() {
+  document.body.classList.add('on-setup');
+  app.innerHTML = `
+    <div class="setup-page">
+      <div class="setup-bg" aria-hidden="true">
+        <span class="blob blob-a"></span>
+        <span class="blob blob-b"></span>
+        <span class="swirl swirl-a"></span>
+        <span class="swirl swirl-b"></span>
+      </div>
+      ${brandHeaderHtml('Song tournament')}
+      <div class="card setup-card home-card">
+        <div class="home-actions">
+          <button type="button" id="mode-solo" class="home-mode-btn">
+            <strong>Solo</strong>
+            <span>You vs the playlist</span>
+          </button>
+          <button type="button" id="mode-party" class="home-mode-btn home-mode-party">
+            <strong>Play with friends</strong>
+            <span>Host a room · share a code · vote together</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.getElementById('mode-solo')?.addEventListener('click', enterSolo);
+  document.getElementById('mode-party')?.addEventListener('click', enterParty);
+}
+
 function render() {
+  // Party mode draws itself; don't wipe #app
+  if (uiMode === 'party') return;
+
+  // Solo match-win beat owns the screen — don't run normal dispose (kills the beat audio)
+  if (matchWinBeat && isSongLike(matchWinBeat.song)) {
+    document.body.classList.remove('on-setup');
+    applyStageVibe(state?.remaining ?? 0);
+    renderMatchWinBeat();
+    return;
+  }
+
   const keepTransition = Boolean(roundTransition);
   const keepChampionBed =
     Boolean(roundTransition?.champion) ||
@@ -1099,6 +1300,7 @@ function render() {
       state = null;
       clearSavedProgress();
       clearStageVibe();
+      uiMode = 'solo';
       renderSetup();
       return;
     }
@@ -1114,16 +1316,22 @@ function render() {
       clearSavedProgress();
       error = 'Saved progress looked stuck — start a new tournament.';
       clearStageVibe();
+      uiMode = 'solo';
       renderSetup();
       return;
     }
+    uiMode = 'solo';
     applyStageVibe(state.remaining);
     renderMatch(gen);
     return;
   }
 
   clearStageVibe();
-  renderSetup();
+  if (uiMode === 'solo') {
+    renderSetup();
+    return;
+  }
+  renderHome();
 }
 
 function renderSetup() {
@@ -1185,11 +1393,12 @@ function renderSetup() {
           ${
             error
               ? `<div class="error-box" role="alert">${escapeHtml(error)}</div>`
-              : `<p class="setup-note">Public Spotify or YouTube playlist. YouTube needs a free API key on the server.</p>`
+              : `<p class="setup-note">Paste a public Spotify or YouTube playlist link.</p>`
           }
 
           <div class="form-actions">
             <button type="submit" id="start-btn">Start tournament</button>
+            <button type="button" class="ghost" id="solo-back-home">Back to menu</button>
           </div>
         </form>
       </div>
@@ -1197,12 +1406,41 @@ function renderSetup() {
   `;
 
   document.getElementById('setup-form')?.addEventListener('submit', onStart);
+  document.getElementById('solo-back-home')?.addEventListener('click', () => {
+    uiMode = 'home';
+    error = '';
+    render();
+  });
+}
+
+/** Top-left toggle during solo play — skip full-screen win beat between matches. */
+function soloWinTransitionToggleHtml() {
+  skipWinBeat = loadSkipWinBeatPref();
+  return `
+    <label class="solo-win-toggle" title="Turn off full-screen winner between matches (faster for long playlists)">
+      <input type="checkbox" id="skip-win-beat" ${skipWinBeat ? 'checked' : ''} />
+      <span>Skip win transitions</span>
+    </label>
+  `;
+}
+
+function wireSoloWinTransitionToggle() {
+  document.getElementById('skip-win-beat')?.addEventListener('change', (e) => {
+    skipWinBeat = Boolean(e.target.checked);
+    saveSkipWinBeatPref(skipWinBeat);
+    // Blur so focus doesn't stay on the checkbox — otherwise 1/2/R keys are ignored
+    // (onMatchKeydown skips events while an INPUT is focused).
+    try {
+      e.target.blur();
+    } catch {
+    }
+  });
 }
 
 function renderRoundTransition() {
   const t = roundTransition;
   if (!t) return;
-  const stage = stageFromRemaining(t.remaining);
+  const stage = stageFromRemaining(t.remaining ?? state?.remaining ?? 0);
   const isChampion = Boolean(t.champion);
   const label = t.toLabel || '';
   const redundantSub =
@@ -1258,6 +1496,7 @@ function renderMatch(gen) {
   const matchesLeft = Math.max(0, p.matchesInRound - roundDone);
 
   app.innerHTML = `
+    ${soloWinTransitionToggleHtml()}
     ${brandHeaderHtml(state.playlist?.name || 'Playlist')}
 
     <div class="progress-bar-wrap">
@@ -1276,14 +1515,35 @@ function renderMatch(gen) {
       ${songCardHtml(match.b, 'b')}
     </div>
 
+    <div class="match-actions">
+      <button type="button" class="ghost" id="undo-btn" ${
+        undoStack.length ? '' : 'disabled'
+      } title="Undo last pick (U)">
+        ← Undo <kbd class="key-hint">U</kbd>
+      </button>
+      <button type="button" class="ghost match-action-random" id="random-btn" title="Pick a winner at random (R)">
+        Can't decide · random <kbd class="key-hint">R</kbd>
+      </button>
+    </div>
+
+    <p class="match-keys-hint muted small">
+      Keyboard: <kbd class="key-hint">1</kbd> left song ·
+      <kbd class="key-hint">2</kbd> right song ·
+      <kbd class="key-hint">U</kbd> undo ·
+      <kbd class="key-hint">R</kbd> random
+    </p>
+
     <div class="match-toolbar">
       <button type="button" class="ghost" id="quit-btn">Start over</button>
       <span class="songs-left">${state.remaining} left in bracket</span>
     </div>
   `;
 
+  wireSoloWinTransitionToggle();
   document.getElementById('pick-a')?.addEventListener('click', () => onPick('a'));
   document.getElementById('pick-b')?.addEventListener('click', () => onPick('b'));
+  document.getElementById('undo-btn')?.addEventListener('click', () => onUndo());
+  document.getElementById('random-btn')?.addEventListener('click', () => onRandomPick());
   document.getElementById('quit-btn')?.addEventListener('click', onQuit);
   wireSongPlayers(match.a, match.b, gen);
 }
@@ -1375,9 +1635,10 @@ function songCardHtml(song, side) {
         type="button"
         class="pick-btn"
         id="pick-${side}"
-        title="${escapeHtml(song.name)}"
+        title="Pick ${escapeHtml(song.name)} (press ${side === 'a' ? '1' : '2'})"
         style="font-size:${nameSize}"
       >
+        <span class="pick-key" aria-hidden="true">${side === 'a' ? '1' : '2'}</span>
         ${escapeHtml(song.name)}
       </button>
     </article>
@@ -2068,6 +2329,13 @@ function renderResults(gen) {
       </div>
 
       <div class="results-actions">
+        ${
+          undoStack.length
+            ? `<button type="button" class="ghost" id="undo-final-btn" title="Undo last pick (U)">
+                ← Undo last pick <kbd class="key-hint">U</kbd>
+              </button>`
+            : ''
+        }
         <button type="button" id="new-game-btn">Start new game!</button>
       </div>
 
@@ -2079,6 +2347,7 @@ function renderResults(gen) {
   `;
 
   document.getElementById('new-game-btn')?.addEventListener('click', onQuit);
+  document.getElementById('undo-final-btn')?.addEventListener('click', () => onUndo());
   wireBracketTabs(document.getElementById('bracket-explorer'));
   // Bind UI only — never restart the bed if reveal already started it
   wireChampionBedUi(champion, gen);
@@ -2482,6 +2751,7 @@ async function onStart(e) {
   disposeMedia({ removeTransition: true });
   stopChampionBed();
   clearPreviewCache();
+  clearUndoStack();
   state = null;
   playlistTracks = [];
   transitionSongIndex = 0;
@@ -2527,14 +2797,75 @@ async function onStart(e) {
   }
 }
 
-function onPick(side) {
-  if (!state || roundTransition || state.finished) return;
-  if (side !== 'a' && side !== 'b') return;
-  if (!currentMatch(state)) return;
+/** Save a restore-point before changing the bracket (used by Undo). */
+function pushUndoSnapshot() {
+  if (!state) return;
+  const snap = serializeState(state);
+  if (!snap) return;
+  undoStack.push(snap);
+  while (undoStack.length > MAX_UNDO) undoStack.shift();
+}
 
+function clearUndoStack() {
+  undoStack.length = 0;
+}
+
+/**
+ * Random winner when the user can't decide.
+ * Same path as clicking a pick button — still records history normally.
+ */
+function onRandomPick() {
+  if (!state || roundTransition || matchWinBeat || state.finished) return;
+  if (!currentMatch(state)) return;
+  const side = Math.random() < 0.5 ? 'a' : 'b';
+  onPick(side);
+}
+
+/**
+ * Go back one pick. Works mid-match, during a round transition, and on the
+ * champion screen (if there is something to undo).
+ */
+function onUndo() {
+  if (!undoStack.length) return;
+
+  // Cancel any in-progress "next round / champion" transition
+  clearTransitionTimer();
+  roundTransition = null;
+  matchWinBeat = null;
+  fadingAudio.clear();
+  cancelAllFades();
+  disposeMedia({ removeTransition: true });
+  stopChampionBed();
+
+  const snap = undoStack.pop();
+  const restored = deserializeState(snap);
+  if (!restored) {
+    // Snapshot was corrupt — give up cleanly
+    error = 'Could not undo that pick.';
+    render();
+    return;
+  }
+
+  state = restored;
+  error = '';
+  prunePreviewCache();
+  saveProgress({ immediate: true });
+  render();
+}
+
+function onPick(side) {
+  if (!state || roundTransition || matchWinBeat || state.finished) return;
+  if (side !== 'a' && side !== 'b') return;
+  const matchBefore = currentMatch(state);
+  if (!matchBefore) return;
+
+  const winnerSong = side === 'a' ? matchBefore.a : matchBefore.b;
   const fromLabel = progress(state).roundLabel;
   const prevRound = state.roundNumber;
-  const prevRegion = currentMatch(state)?.region;
+  const prevRegion = matchBefore?.region;
+
+  // Snapshot *before* the pick so Undo can come back here
+  pushUndoSnapshot();
 
   state = pickWinner(state, side);
   // Loser's preview URL can leave memory now
@@ -2558,16 +2889,31 @@ function onPick(side) {
   const waveChanged = state.roundNumber !== prevRound;
   const enteredFinal = nextMatch?.region === 'final' && prevRegion !== 'final';
 
-  if (waveChanged || enteredFinal) {
-    scheduleTransition(
-      {
-        fromLabel,
-        toLabel: progress(state).roundLabel,
-        remaining: state.remaining,
-        transitionSong: takeNextTransitionSong(),
-      },
-      4200
+  const wavePayload =
+    waveChanged || enteredFinal
+      ? {
+          fromLabel,
+          toLabel: progress(state).roundLabel,
+          remaining: state.remaining,
+          transitionSong: takeNextTransitionSong(),
+        }
+      : null;
+
+  // Solo: party-style win screen after every pick (unless “Skip win transitions”)
+  // Re-read pref in case setup checkbox changed it this session
+  skipWinBeat = loadSkipWinBeatPref();
+  if (!skipWinBeat && isSongLike(winnerSong)) {
+    scheduleMatchWinBeat(
+      winnerSong,
+      wavePayload
+        ? { type: 'wave', payload: wavePayload, ms: 4200 }
+        : { type: 'done' }
     );
+    return;
+  }
+
+  if (wavePayload) {
+    scheduleTransition(wavePayload, 4200);
     return;
   }
 
@@ -2578,19 +2924,86 @@ function onQuit() {
   loadGeneration += 1;
   clearTransitionTimer();
   roundTransition = null;
+  matchWinBeat = null;
   fadingAudio.clear();
   disposeMedia({ removeTransition: true });
   stopChampionBed();
   destroyAllYouTubePlayers();
   clearPreviewCache();
   clearSavedProgress();
+  clearUndoStack();
   state = null;
   playlistTracks = [];
   transitionSongIndex = 0;
   clearTrackVolumes();
   error = '';
   clearStageVibe();
+  uiMode = 'home';
   render();
+}
+
+/**
+ * Keyboard shortcuts while a match is on screen (or undo on results).
+ * Ignored when typing in a text field so setup still works.
+ * Checkboxes (e.g. skip win transitions) do NOT block 1/2/R.
+ */
+function onMatchKeydown(e) {
+  if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+
+  const el = e.target;
+  const tag = (el && el.tagName) || '';
+  if (tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable) {
+    return;
+  }
+  if (tag === 'INPUT') {
+    const type = (el.type || 'text').toLowerCase();
+    // Only block real typing fields — not checkbox/radio/range/button
+    if (
+      type === 'text' ||
+      type === 'url' ||
+      type === 'search' ||
+      type === 'email' ||
+      type === 'password' ||
+      type === 'number' ||
+      type === '' ||
+      type === 'tel'
+    ) {
+      return;
+    }
+  }
+
+  const key = e.key;
+
+  // Undo: U (also works on results / during transition if stack has entries)
+  if (key === 'u' || key === 'U') {
+    if (!undoStack.length) return;
+    e.preventDefault();
+    onUndo();
+    return;
+  }
+
+  // During transition screens, only undo is allowed (not accidental picks)
+  if (roundTransition || matchWinBeat || loading) return;
+
+  if (state?.finished) return;
+
+  if (!state || !currentMatch(state)) return;
+
+  // e.key is "1"/"2"; e.code is "Digit1"/"Digit2" (numrow) or "Numpad1"/…
+  if (key === '1' || e.code === 'Digit1' || e.code === 'Numpad1') {
+    e.preventDefault();
+    onPick('a');
+    return;
+  }
+  if (key === '2' || e.code === 'Digit2' || e.code === 'Numpad2') {
+    e.preventDefault();
+    onPick('b');
+    return;
+  }
+  if (key === 'r' || key === 'R') {
+    e.preventDefault();
+    onRandomPick();
+  }
 }
 
 function goHome() {
@@ -2622,11 +3035,27 @@ document.addEventListener('visibilitychange', () => {
 });
 
 const restored = loadProgress();
-if (restored) {
-  state = restored;
-  roundTransition = null;
-}
+const linkRoom = parseRoomFromUrl();
 
+// Global solo shortcuts (party has its own keys inside party-app)
+window.addEventListener('keydown', onMatchKeydown);
 // Idle baseline wave; becomes a real scope when a preview plays
 startScope();
-render();
+
+// Share link ?room=CODE → open party join (don't drop into a restored solo game)
+if (linkRoom.length === 6) {
+  // Keep any solo save on disk; just don't enter solo UI this load
+  state = null;
+  roundTransition = null;
+  matchWinBeat = null;
+  clearUndoStack();
+  enterParty();
+} else {
+  if (restored) {
+    state = restored;
+    roundTransition = null;
+    uiMode = 'solo';
+    clearUndoStack();
+  }
+  render();
+}

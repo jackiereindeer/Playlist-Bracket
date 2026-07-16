@@ -7,8 +7,9 @@
 
 Cross-session human + AI memory lives outside this repo at:
 
-`C:\Users\braej\AI-Context\CORE.md`  
-`C:\Users\braej\AI-Context\projects\playlist-bracket.md`
+`C:\Users\braej\AI-Context\START_HERE.md`  
+`C:\Users\braej\AI-Context\CORE.md` — **how braej likes answers/help**  
+`C:\Users\braej\AI-Context\projects\playlist-bracket.md` — full product/party/go-live notes  
 
 Read those when starting a fresh session. This file is the **in-repo** source of truth for how to work *in this codebase*.
 
@@ -17,18 +18,41 @@ Read those when starting a fresh session. This file is the **in-repo** source of
 - Owner is **not** a heavy coder → **over-explain** what/why/where in plain language.
 - **Narrate while working** (what file you’re opening, what you’re about to change, build results).
 - Support **VS Code follow-along**: paths, Ctrl+P / Ctrl+F targets, plain-English section descriptions after edits.
+- Big features: interrogate first; piece-by-piece guides when asked.
+- **Never `git push` / deploy to Render** unless braej gives clear specific confirmation (e.g. `push party to GitHub now`). Live auto-deploys from `main`.
 
 ---
 
 ## What this app is
 
-March Madness–style **1v1 song tournament** from a **public** Spotify or YouTube playlist. User pastes a link, picks winners match by match until one champion remains.
+March Madness–style **1v1 song tournament** from a **public** Spotify or YouTube playlist.
 
-- **No player Spotify login.** Public playlists only.
-- Spotify tracks: short previews via server + official-style listening UX; YouTube: embedded IFrame API players.
-- Local progress save in `localStorage` (`playlist-bracket-save-v1`).
-- Visual polish: stage “vibe” CSS, canvas oscilloscope (`scope.js`), volume fades, round transition stingers, champion bed music.
-- Desktop: Electron shells the Express server + built UI (portable/NSIS via electron-builder).
+### Solo (also what’s live on Render today)
+
+- Paste playlist → pick winners → champion.  
+- Win-beat full-screen after each pick (skippable checkbox for long lists).  
+- Undo / 1–2 keys / random; localStorage save.
+
+### Party (local only until explicit push)
+
+- Home → **Play with friends** → host/join 6-char code.  
+- Kahoot-style votes, sync or desync play, timers, results with brackets.  
+- Server: `server/party/*` WebSocket **`/party`**. Client: `src/party/*`.  
+- Party playlists: **Spotify-only** for now.
+
+**Never put the word “Blight” in product UI** (folder name only).
+
+---
+
+## Deploy / live site (critical)
+
+| | |
+|--|--|
+| Live | https://playlist-bracket.onrender.com/ |
+| GitHub | https://github.com/jackiereindeer/Playlist-Bracket |
+| Auto-deploy | Push to `main` updates live |
+| Live content | **Solo only** until braej ships party |
+| Before party push | Share link + **custom PFPs** + checklist in AI-Context project note |
 
 ---
 
@@ -36,27 +60,28 @@ March Madness–style **1v1 song tournament** from a **public** Spotify or YouTu
 
 ```
 blight website/
-├── AGENTS.md              # this file
-├── README.md              # human setup / deploy docs
-├── package.json           # scripts + electron-builder config
-├── vite.config.js         # dev :5173, proxies /api → :3001
+├── AGENTS.md
+├── README.md
+├── package.json
+├── vite.config.js         # :5173, proxies /api + /party → :3001
 ├── index.html
-├── .env                   # secrets (gitignored) — never commit
-├── .env.example
-├── electron/main.cjs      # desktop shell; port 3847 by default
+├── .env                   # gitignored — never commit
+├── electron/main.cjs
 ├── server/
-│   ├── index.js           # Express API + prod static; exports startServer()
-│   ├── spotify-public.js  # no-login public playlist fetch (pathfinder + pages)
-│   └── youtube-public.js  # YouTube Data API v3 (needs YOUTUBE_API_KEY)
+│   ├── index.js           # API + startServer() + party hub attach
+│   ├── party/             # multiplayer WS rooms
+│   ├── spotify-public.js
+│   └── youtube-public.js
 ├── src/
-│   ├── main.js            # UI state machine, audio, save/load, all screens
-│   ├── tournament.js      # bracket / rounds / byes / regions
-│   ├── youtube-players.js # YT IFrame API helpers
-│   ├── scope.js           # Web Audio analyser → canvas scope
-│   └── style.css          # full visual design
+│   ├── main.js            # solo + home mode switch
+│   ├── party/             # party-app.js, party-bracket.js
+│   ├── tournament.js
+│   ├── youtube-players.js
+│   ├── scope.js
+│   └── style.css
 ├── public/
-├── dist/                  # vite build output
-└── release/               # electron-builder artifacts
+├── dist/
+└── release/
 ```
 
 ---
@@ -83,7 +108,7 @@ Work from the project root. Prefer `npm.cmd` if plain `npm` is flaky on PATH.
 | Express API (dev/prod CLI) | 3001 |
 | Electron managed server | 3847 (avoids clashing with dev) |
 
-Vite proxies `/api/*` → `http://localhost:3001`.
+Vite proxies `/api/*` and WebSocket `/party` → `http://localhost:3001` / `ws://localhost:3001`.
 
 ---
 

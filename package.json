@@ -2,14 +2,21 @@
   "name": "playlist-bracket",
   "version": "1.0.0",
   "private": true,
+  "description": "March Madness–style playlist song tournament (Spotify & YouTube)",
+  "author": "braej",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "concurrently -n server,web -c green,cyan \"node server/index.js\" \"vite\"",
     "dev:server": "node server/index.js",
     "dev:web": "vite",
     "build": "vite build",
     "start": "node server/index.js",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "desktop": "npm run build && electron .",
+    "desktop:dev": "electron .",
+    "dist": "npm run build && electron-builder --win",
+    "dist:portable": "npm run build && electron-builder --win portable"
   },
   "engines": {
     "node": ">=20"
@@ -18,9 +25,71 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "vite": "^8.1.1"
+    "vite": "^8.1.1",
+    "ws": "^8.21.1"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2"
+    "concurrently": "^9.1.2",
+    "electron": "^43.1.1",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.playlistbracket.app",
+    "productName": "Playlist Bracket",
+    "copyright": "Copyright © Playlist Bracket",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "server/**/*",
+      "electron/**/*",
+      "package.json",
+      "public/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": ".env",
+        "to": ".env",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "asar": true,
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Playlist Bracket"
+    },
+    "portable": {
+      "artifactName": "PlaylistBracket-Portable-${version}.exe"
+    }
+  },
+  "allowScripts": {
+    "electron@35.7.5": true,
+    "electron-winstaller@5.4.0": true
   }
 }

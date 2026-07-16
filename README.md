@@ -20,7 +20,30 @@ The site loads **full** public playlists the same way many bots/tools do: an ano
 
 ---
 
-## Run locally
+## Windows desktop app
+
+A packaged **Windows app** (Electron) lives in `release/`:
+
+| File | What it is |
+|------|------------|
+| `release\PlaylistBracket-Portable-1.0.0.exe` | Double-click portable app (no install) |
+| `release\win-unpacked\Playlist Bracket.exe` | Unpacked folder version |
+
+```powershell
+cd "C:\Users\braej\blight website"
+npm.cmd install
+npm.cmd run dist:portable
+```
+
+- Needs internet (Spotify/YouTube).
+- Uses your project `.env` (YouTube key, etc.) — **don’t share the exe if it embeds your keys**.
+- Rebuild after code changes with `npm.cmd run dist:portable`.
+
+Dev shortcut (after `npm run build`): `npm.cmd run desktop`
+
+---
+
+## Run locally (browser)
 
 You need [Node.js](https://nodejs.org/) (LTS).
 

@@ -14,6 +14,7 @@ import {
   fetchYouTubePlaylist,
   getApiKey as getYouTubeApiKey,
 } from './youtube-public.js';
+import { attachPartyHub } from './party/hub.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -22,6 +23,9 @@ const isProd = process.env.NODE_ENV === 'production';
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+/** Set true only when you intentionally deploy party online. Local multi-tab works either way. */
+const PARTY_ENABLED = process.env.PARTY_ENABLED !== '0';
+
 app.use(cors());
 app.use(express.json({ limit: '32kb' }));
 
@@ -29,6 +33,7 @@ app.get('/api/health', (_req, res) => {
   res.json({
     ok: true,
     youtube: Boolean(getYouTubeApiKey()),
+    party: PARTY_ENABLED,
   });
 });
 
@@ -137,11 +142,25 @@ app.get('*', (req, res, next) => {
  */
 export function startServer(opts = {}) {
   const port = Number(opts.port || process.env.PORT || PORT) || 3001;
-  const host = opts.host || process.env.HOST || '127.0.0.1';
+  // Local/Electron: loopback. Render/production: all interfaces so friends can connect.
+  const host =
+    opts.host ||
+    process.env.HOST ||
+    (isProd ? '0.0.0.0' : '127.0.0.1');
 
   return new Promise((resolve, reject) => {
     const server = app.listen(port, host, () => {
       console.log(`Server running on http://${host}:${port}`);
+      if (PARTY_ENABLED) {
+        try {
+          attachPartyHub(server);
+          console.log(
+            `[party] Multiplayer ready — WebSocket path /party on ${host}:${port}`
+          );
+        } catch (err) {
+          console.error('[party] failed to start hub:', err.message);
+        }
+      }
       resolve({ server, port, host });
     });
     server.on('error', reject);

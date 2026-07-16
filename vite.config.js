@@ -8,6 +8,12 @@ export default defineConfig({
         target: 'http://localhost:3001',
         changeOrigin: true,
       },
+      // Party multiplayer WebSocket → Express on 3001
+      '/party': {
+        target: 'ws://localhost:3001',
+        ws: true,
+        changeOrigin: true,
+      },
     },
   },
   build: {
