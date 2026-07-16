@@ -101,6 +101,17 @@ body[data-stage='final'] {
   animation: pageIn 0.45s ease both;
 }
 
+body.on-setup #app {
+  max-width: none;
+  width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 @keyframes pageIn {
   from {
     opacity: 0;
@@ -283,27 +294,55 @@ button.ghost:hover:not(:disabled) {
   font-weight: 500;
 }
 
+html:has(body.on-setup),
 body.on-setup {
+  min-height: 100%;
+  height: 100%;
+}
+
+body.on-setup {
+  min-height: 100vh;
+  min-height: 100dvh;
+  margin: 0;
+  overflow-x: hidden;
   background:
-    radial-gradient(ellipse 70% 55% at 10% 15%, rgba(56, 189, 248, 0.28), transparent 55%),
-    radial-gradient(ellipse 60% 50% at 90% 20%, rgba(244, 114, 182, 0.26), transparent 50%),
-    radial-gradient(ellipse 55% 45% at 50% 95%, rgba(52, 211, 153, 0.2), transparent 55%),
-    radial-gradient(ellipse 40% 35% at 75% 70%, rgba(167, 139, 250, 0.22), transparent 50%),
+    radial-gradient(ellipse 90% 70% at 0% 0%, rgba(56, 189, 248, 0.38), transparent 58%),
+    radial-gradient(ellipse 80% 65% at 100% 0%, rgba(244, 114, 182, 0.34), transparent 55%),
+    radial-gradient(ellipse 70% 55% at 50% 100%, rgba(52, 211, 153, 0.28), transparent 58%),
+    radial-gradient(ellipse 55% 50% at 80% 60%, rgba(167, 139, 250, 0.3), transparent 55%),
+    radial-gradient(ellipse 50% 45% at 15% 70%, rgba(251, 191, 36, 0.18), transparent 50%),
     #0b1020;
+  background-attachment: fixed;
 }
 
 .setup-page {
-  width: 100%;
   position: relative;
   z-index: 1;
+  width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+  margin: 0;
+  padding: clamp(1.25rem, 4vw, 2.5rem) 1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.25rem;
+  box-sizing: border-box;
+}
+
+.setup-page .app-header {
+  margin-bottom: 0.5rem;
+  width: 100%;
   max-width: 520px;
-  margin: 0 auto;
-  padding-bottom: 2rem;
 }
 
 .setup-bg {
   position: fixed;
   inset: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   pointer-events: none;
   z-index: 0;
@@ -312,42 +351,42 @@ body.on-setup {
 .blob {
   position: absolute;
   border-radius: 50%;
-  filter: blur(8px);
-  opacity: 0.85;
+  filter: blur(10px);
+  opacity: 0.9;
   animation: floaty 14s ease-in-out infinite;
 }
 
 .blob-a {
-  width: 280px;
-  height: 280px;
-  left: -60px;
-  top: 12%;
+  width: min(48vw, 420px);
+  height: min(48vw, 420px);
+  left: -8%;
+  top: 5%;
   background: radial-gradient(circle at 30% 30%, #5eead4, #0ea5e9 55%, transparent 70%);
 }
 
 .blob-b {
-  width: 340px;
-  height: 340px;
-  right: -80px;
-  top: 8%;
+  width: min(52vw, 480px);
+  height: min(52vw, 480px);
+  right: -10%;
+  top: 0%;
   background: radial-gradient(circle at 40% 40%, #f9a8d4, #c084fc 50%, transparent 72%);
   animation-delay: -3s;
 }
 
 .blob-c {
-  width: 260px;
-  height: 260px;
-  left: 18%;
-  bottom: -40px;
+  width: min(42vw, 380px);
+  height: min(42vw, 380px);
+  left: 10%;
+  bottom: -8%;
   background: radial-gradient(circle at 50% 40%, #fde68a, #fb923c 55%, transparent 70%);
   animation-delay: -6s;
 }
 
 .blob-d {
-  width: 200px;
-  height: 200px;
-  right: 18%;
-  bottom: 12%;
+  width: min(38vw, 340px);
+  height: min(38vw, 340px);
+  right: 8%;
+  bottom: 5%;
   background: radial-gradient(circle at 40% 40%, #86efac, #22d3ee 60%, transparent 72%);
   animation-delay: -9s;
 }
@@ -356,58 +395,58 @@ body.on-setup {
   position: absolute;
   border-radius: 50%;
   border: 3px solid transparent;
-  opacity: 0.55;
+  opacity: 0.6;
   animation: spinSlow 28s linear infinite;
 }
 
 .swirl-a {
-  width: 180px;
-  height: 180px;
-  left: 8%;
-  top: 42%;
+  width: min(28vw, 220px);
+  height: min(28vw, 220px);
+  left: 6%;
+  top: 40%;
   border-top-color: #38bdf8;
   border-right-color: #a78bfa;
   border-style: solid;
-  border-width: 4px 4px 0 0;
+  border-width: 5px 5px 0 0;
   border-radius: 50%;
 }
 
 .swirl-b {
-  width: 120px;
-  height: 120px;
-  right: 12%;
-  top: 48%;
+  width: min(22vw, 160px);
+  height: min(22vw, 160px);
+  right: 8%;
+  top: 45%;
   border-bottom-color: #f472b6;
   border-left-color: #fbbf24;
   border-style: solid;
-  border-width: 0 0 4px 4px;
+  border-width: 0 0 5px 5px;
   animation-direction: reverse;
   animation-duration: 22s;
 }
 
 .swirl-c {
-  width: 90px;
-  height: 90px;
-  left: 55%;
-  top: 18%;
+  width: min(16vw, 120px);
+  height: min(16vw, 120px);
+  left: 52%;
+  top: 14%;
   border-top-color: #34d399;
   border-left-color: #60a5fa;
   border-style: solid;
-  border-width: 3px 0 0 3px;
+  border-width: 4px 0 0 4px;
   animation-duration: 18s;
 }
 
 .shape {
   position: absolute;
-  opacity: 0.7;
+  opacity: 0.75;
 }
 
 .shape-ring {
-  width: 70px;
-  height: 70px;
-  right: 28%;
-  top: 28%;
-  border: 5px solid #f472b6;
+  width: min(12vw, 90px);
+  height: min(12vw, 90px);
+  right: 22%;
+  top: 22%;
+  border: 6px solid #f472b6;
   border-radius: 50%;
   animation: floaty 11s ease-in-out infinite;
   animation-delay: -2s;
@@ -416,41 +455,41 @@ body.on-setup {
 .shape-dot-a,
 .shape-dot-b,
 .shape-dot-c {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   animation: floaty 9s ease-in-out infinite;
 }
 
 .shape-dot-a {
   background: #fbbf24;
-  left: 22%;
-  top: 22%;
+  left: 18%;
+  top: 18%;
 }
 
 .shape-dot-b {
   background: #38bdf8;
-  right: 24%;
-  bottom: 28%;
-  width: 18px;
-  height: 18px;
+  right: 18%;
+  bottom: 24%;
+  width: 22px;
+  height: 22px;
   animation-delay: -4s;
 }
 
 .shape-dot-c {
   background: #c084fc;
-  left: 42%;
-  bottom: 18%;
-  width: 11px;
-  height: 11px;
+  left: 40%;
+  bottom: 14%;
+  width: 14px;
+  height: 14px;
   animation-delay: -1s;
 }
 
 .shape-bar {
-  width: 64px;
-  height: 10px;
-  left: 12%;
-  bottom: 32%;
+  width: min(14vw, 90px);
+  height: 12px;
+  left: 10%;
+  bottom: 28%;
   border-radius: 999px;
   background: linear-gradient(90deg, #34d399, #22d3ee);
   transform: rotate(-28deg);
@@ -459,11 +498,11 @@ body.on-setup {
 }
 
 .shape-arc {
-  width: 100px;
-  height: 50px;
-  right: 10%;
-  bottom: 40%;
-  border: 5px solid #a78bfa;
+  width: min(18vw, 130px);
+  height: min(9vw, 65px);
+  right: 8%;
+  bottom: 36%;
+  border: 6px solid #a78bfa;
   border-bottom: none;
   border-radius: 100px 100px 0 0;
   transform: rotate(18deg);
@@ -477,10 +516,10 @@ body.on-setup {
     transform: translate(0, 0) rotate(0deg);
   }
   33% {
-    transform: translate(12px, -16px) rotate(4deg);
+    transform: translate(14px, -18px) rotate(4deg);
   }
   66% {
-    transform: translate(-10px, 10px) rotate(-3deg);
+    transform: translate(-12px, 12px) rotate(-3deg);
   }
 }
 
@@ -493,9 +532,11 @@ body.on-setup {
 .setup-card {
   position: relative;
   z-index: 1;
-  backdrop-filter: blur(14px);
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
-  border-color: color-mix(in srgb, #fff 12%, var(--border));
+  width: 100%;
+  max-width: 520px;
+  backdrop-filter: blur(16px);
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  border-color: color-mix(in srgb, #fff 14%, var(--border));
 }
 
 .setup-note {
@@ -511,14 +552,9 @@ body.on-setup {
 }
 
 @media (max-width: 700px) {
-  .blob-a,
-  .blob-b {
-    width: 200px;
-    height: 200px;
-  }
-
-  .shape-arc {
-    display: none;
+  .setup-page {
+    justify-content: flex-start;
+    padding-top: 2rem;
   }
 }
 
