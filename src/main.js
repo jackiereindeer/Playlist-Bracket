@@ -1583,7 +1583,7 @@ function onPick(side) {
         remaining: 1,
         champion: state.champion,
       },
-      4200
+      6200
     );
     return;
   }
@@ -1600,7 +1600,7 @@ function onPick(side) {
         remaining: state.remaining,
         transitionSong: takeNextTransitionSong(),
       },
-      2200
+      4200
     );
     return;
   }
