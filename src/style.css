@@ -94,7 +94,7 @@ body[data-stage='final'] {
   --accent-hover: #fda4af;
 }
 
-/* Real-time oscilloscope — sits behind UI panels */
+/* Subtle scope line behind UI — keep it quiet so it doesn't own the screen */
 #scope-bg {
   position: fixed;
   inset: 0;
@@ -102,12 +102,12 @@ body[data-stage='final'] {
   height: 100%;
   z-index: 0;
   pointer-events: none;
-  opacity: 0.55;
+  opacity: 0.28;
   mix-blend-mode: screen;
 }
 
 body.on-setup #scope-bg {
-  opacity: 0.35;
+  opacity: 0.16;
 }
 
 #app {
