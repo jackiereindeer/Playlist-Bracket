@@ -8,6 +8,7 @@ import {
 import {
   prepareMediaElement,
   connectMediaElement,
+  disconnectMediaElement,
   resumeAudioContext,
   kickScopeFromPlayback,
   startScope,
@@ -68,10 +69,24 @@ let transitionSongIndex = 0;
 const DEFAULT_MATCH_VOLUME = 0.25;
 const DEFAULT_TRANSITION_VOLUME = 0.1;
 const SAVE_DEBOUNCE_MS = 350;
-const MAX_CACHED_PREVIEWS = 400;
-const MAX_TRACK_VOLUMES = 800;
+/** Only need a handful of preview URLs hot — not every song ever previewed. */
+const MAX_CACHED_PREVIEWS = 48;
+const MAX_TRACK_VOLUMES = 200;
 
 const STORAGE_KEY = 'playlist-bracket-save-v1';
+
+/**
+ * Match <audio> players live outside #app and are reused every round.
+ * Creating a new MediaElementSource per match was the long-tournament lag bug
+ * (100+ songs × 2 previews left hundreds of Web Audio nodes alive).
+ */
+const POOL_AUDIO_SIDES = new Set(['a', 'b', 'transition', 'champion-bed']);
+
+/** Match audio currently fading out — don't hard-stop until fade finishes. */
+const fadingAudio = new Set();
+
+/** Cleanup fns for YouTube seek-bar intervals (cleared every render). */
+const seekPollCleanups = [];
 
 function isSongLike(s) {
   return s && typeof s === 'object' && typeof s.id === 'string' && s.id.length > 0;
@@ -352,7 +367,62 @@ function clearPreviewCache() {
   }
 }
 
-function hardStopAudio(audio) {
+/**
+ * Drop preview URL cache entries for songs that already lost (and anything
+ * beyond the max). Keeps memory flat during 100+ song brackets.
+ */
+function prunePreviewCache() {
+  if (state) {
+    const keep = new Set();
+    const m = currentMatch(state);
+    if (m?.a?.id) keep.add(m.a.id);
+    if (m?.b?.id) keep.add(m.b.id);
+    if (state.champion?.id) keep.add(state.champion.id);
+    const eliminated = eliminatedTrackIds(state);
+    for (const id of Object.keys(previewCache)) {
+      if (eliminated.has(id) && !keep.has(id)) {
+        delete previewCache[id];
+      }
+    }
+  }
+  trimPreviewCache();
+}
+
+/**
+ * Reusable <audio> for match sides / transition / champion bed.
+ * Lives on document.body so re-rendering #app never destroys it.
+ */
+function getPoolAudio(side, { loop = false, preload = 'none' } = {}) {
+  const id = `audio-${side}`;
+  let audio = document.getElementById(id);
+  if (!audio) {
+    audio = document.createElement('audio');
+    audio.id = id;
+    audio.setAttribute('playsinline', '');
+    audio.preload = preload;
+    audio.hidden = true;
+    if (loop) audio.loop = true;
+    document.body.appendChild(audio);
+  }
+  return audio;
+}
+
+function clearAllSeekPolls() {
+  for (const stop of seekPollCleanups) {
+    try {
+      stop();
+    } catch {
+    }
+  }
+  seekPollCleanups.length = 0;
+}
+
+/**
+ * Stop playback and free the decoded buffer on this element.
+ * Pool players keep their MediaElementSource (reconnect is impossible once
+ * created). Abandoned one-off elements disconnect from the Web Audio graph.
+ */
+function hardStopAudio(audio, { abandon = false } = {}) {
   if (!audio) return;
   try {
     audio.pause();
@@ -363,9 +433,16 @@ function hardStopAudio(audio) {
     audio.onplay = null;
     audio.onpause = null;
     audio.removeAttribute('src');
-    // Empty source + load aborts network and frees the buffer
+    try {
+      delete audio.dataset.trackId;
+    } catch {
+    }
+    // Empty source + load aborts network and frees the decoded buffer
     audio.load();
   } catch {
+  }
+  if (abandon) {
+    disconnectMediaElement(audio);
   }
 }
 
@@ -447,8 +524,9 @@ function fadeYouTubeVolume(side, from, to, ms, key) {
 }
 
 /**
- * Detach currently playing match audio from the card, fade to silence, remove.
- * Lets the transition screen render without a hard cut of the previous track.
+ * Fade match audio to silence without hard-stopping yet.
+ * Pool players stay put on <body>; disposeMedia skips them while fading so the
+ * soft handoff into the round-transition screen still works.
  */
 function orphanAndFadeOutMatchAudio() {
   const jobs = [];
@@ -456,16 +534,12 @@ function orphanAndFadeOutMatchAudio() {
     const el = document.getElementById(`audio-${side}`);
     if (el && !el.paused && el.currentSrc) {
       const from = el.volume;
-      const fadeId = `fade-match-${side}-${Date.now()}`;
-      el.id = fadeId;
-      document.body.appendChild(el);
+      fadingAudio.add(el);
+      const fadeKey = `fade-match-${side}`;
       jobs.push(
-        fadeHtmlVolume(el, from, 0, FADE_OUT_MS, fadeId).then(() => {
+        fadeHtmlVolume(el, from, 0, FADE_OUT_MS, fadeKey).then(() => {
           hardStopAudio(el);
-          try {
-            el.remove();
-          } catch {
-          }
+          fadingAudio.delete(el);
         })
       );
     }
@@ -490,15 +564,11 @@ async function fadeOutTransitionMusic() {
   const audio = document.getElementById('audio-transition');
   if (audio && audio.currentSrc && !audio.paused) {
     const from = audio.volume;
+    fadingAudio.add(audio);
     jobs.push(
       fadeHtmlVolume(audio, from, 0, FADE_OUT_MS, 'html-transition-out').then(() => {
         hardStopAudio(audio);
-        if (audio.parentNode) {
-          try {
-            audio.parentNode.removeChild(audio);
-          } catch {
-          }
-        }
+        fadingAudio.delete(audio);
       })
     );
   }
@@ -520,11 +590,19 @@ async function fadeOutTransitionMusic() {
 }
 
 function disposeMedia({ removeTransition = false } = {}) {
+  clearAllSeekPolls();
+
   for (const side of ['a', 'b', 'champion', 'transition']) {
     const audio = document.getElementById(`audio-${side}`);
-    if (audio) {
-      hardStopAudio(audio);
-      if (side === 'transition' && removeTransition && audio.parentNode) {
+    if (audio && !fadingAudio.has(audio)) {
+      // Pool players: stop + clear buffer, keep the element + MediaElementSource
+      hardStopAudio(audio, { abandon: !POOL_AUDIO_SIDES.has(side) });
+      if (
+        side === 'transition' &&
+        removeTransition &&
+        audio.parentNode &&
+        !POOL_AUDIO_SIDES.has(side)
+      ) {
         try {
           audio.parentNode.removeChild(audio);
         } catch {
@@ -535,6 +613,17 @@ function disposeMedia({ removeTransition = false } = {}) {
     if (side !== 'champion-bed') destroyYouTubePlayer(side);
   }
   destroyYouTubePlayer('transition');
+
+  // Legacy one-off fade clones (pre-pool) — disconnect and remove
+  for (const el of document.querySelectorAll('audio[id^="fade-match-"]')) {
+    if (fadingAudio.has(el)) continue;
+    hardStopAudio(el, { abandon: true });
+    try {
+      el.remove();
+    } catch {
+    }
+  }
+
   onMediaDisposed();
 }
 
@@ -555,16 +644,7 @@ function pauseAllHtmlAudioExcept(exceptSide = null) {
 
 /** Persistent champion player — lives outside #app so re-renders don't kill it. */
 function getChampionBed() {
-  let audio = document.getElementById('audio-champion-bed');
-  if (!audio) {
-    audio = document.createElement('audio');
-    audio.id = 'audio-champion-bed';
-    audio.setAttribute('playsinline', '');
-    audio.preload = 'auto';
-    audio.loop = true;
-    document.body.appendChild(audio);
-  }
-  return audio;
+  return getPoolAudio('champion-bed', { loop: true, preload: 'auto' });
 }
 
 function championBedIsFor(songId) {
@@ -599,17 +679,8 @@ function stopChampionBed() {
   }
   const audio = document.getElementById('audio-champion-bed');
   if (!audio) return;
-  try {
-    audio.pause();
-    audio.onended = null;
-    audio.onerror = null;
-    audio.onplay = null;
-    audio.onpause = null;
-    delete audio.dataset.trackId;
-    audio.removeAttribute('src');
-    audio.load();
-  } catch {
-  }
+  // Keep MediaElementSource on the pool player — only clear the buffer
+  hardStopAudio(audio);
 }
 
 /**
@@ -864,14 +935,7 @@ function playAutoPreview(song, volume, gen) {
 
   ensurePreviewUrl(song.id).then((url) => {
     if (gen !== renderGeneration || !url) return;
-    let audio = document.getElementById('audio-transition');
-    if (!audio) {
-      audio = document.createElement('audio');
-      audio.id = 'audio-transition';
-      audio.setAttribute('playsinline', '');
-      audio.preload = 'auto';
-      document.body.appendChild(audio);
-    }
+    const audio = getPoolAudio('transition', { preload: 'auto' });
     try {
       hardStopAudio(audio);
       prepareMediaElement(audio);
@@ -974,17 +1038,24 @@ function playChampionBedFaded(song, volume01) {
 }
 
 function silenceMatchPlayers({ removeTransition = false } = {}) {
+  clearAllSeekPolls();
   for (const side of ['a', 'b', 'champion', 'transition']) {
     const el = document.getElementById(`audio-${side}`);
-    if (!el) continue;
-    hardStopAudio(el);
-    if (side === 'transition' && removeTransition && el.parentNode) {
+    if (!el || fadingAudio.has(el)) continue;
+    hardStopAudio(el, { abandon: !POOL_AUDIO_SIDES.has(side) });
+    if (
+      side === 'transition' &&
+      removeTransition &&
+      el.parentNode &&
+      !POOL_AUDIO_SIDES.has(side)
+    ) {
       try {
         el.parentNode.removeChild(el);
       } catch {
       }
     }
   }
+  onMediaDisposed();
 }
 
 function render() {
@@ -999,6 +1070,9 @@ function render() {
   } else {
     disposeMedia({ removeTransition: !keepTransition });
   }
+
+  // Drop preview URLs for songs that already lost so long brackets stay light
+  prunePreviewCache();
 
   renderGeneration += 1;
   const gen = renderGeneration;
@@ -1283,7 +1357,7 @@ function songCardHtml(song, side) {
                 />
                 <span class="yt-time yt-time-end" id="yt-dur-${side}">0:00</span>
               </div>`
-            : `<audio id="audio-${side}" preload="none"></audio>
+            : `<!-- match audio is a reused body pool player (see getPoolAudio) -->
         <button
           type="button"
           class="cover-play-btn"
@@ -1444,7 +1518,9 @@ function wireYouTubeSeekBar(side, gen) {
   startPoll();
   update();
 
-  return () => stopPoll();
+  const stop = () => stopPoll();
+  seekPollCleanups.push(stop);
+  return stop;
 }
 
 function wireYouTubeOnePlayer(side, song, volumeKey, gen, options = {}) {
@@ -1573,7 +1649,9 @@ function wireOnePlayer(side, song, volumeKey, gen, options = {}) {
     return;
   }
 
-  const audio = document.getElementById(`audio-${side}`);
+  // Reuse the same <audio> for this side all tournament (Web Audio can only
+  // attach one MediaElementSource per element — new elements = lag over time)
+  const audio = getPoolAudio(side);
   const playBtn = document.getElementById(`play-${side}`);
   const status = document.getElementById(`status-${side}`);
   const slider = document.getElementById(`vol-${side}`);
@@ -1661,9 +1739,15 @@ function wireOnePlayer(side, song, volumeKey, gen, options = {}) {
 
 function setupPreviewPlayback(side, song, volumeKey, gen, audio, playBtn, status, url, options = {}) {
   const { autoplay = false } = options;
+  // Stop any previous buffer on this pool player, then load the new preview URL
+  hardStopAudio(audio);
   // crossOrigin before src → real analyser samples; graph routes to speakers
   prepareMediaElement(audio);
   audio.src = url;
+  try {
+    audio.dataset.trackId = song.id;
+  } catch {
+  }
   connectMediaElement(audio);
   playBtn.disabled = false;
   playBtn.classList.remove('no-preview');
@@ -1960,7 +2044,7 @@ function renderResults(gen) {
                   />
                   <span class="yt-time yt-time-end" id="yt-dur-champion">0:00</span>
                 </div>`
-              : `<audio id="audio-champion" preload="none"></audio>
+              : `<!-- champion uses body pool player audio-champion-bed -->
           <button
             type="button"
             class="cover-play-btn${championBedIsPlaying(champion.id) ? ' is-playing' : ''}"
@@ -2394,6 +2478,7 @@ async function onStart(e) {
 
   clearTransitionTimer();
   roundTransition = null;
+  fadingAudio.clear();
   disposeMedia({ removeTransition: true });
   stopChampionBed();
   clearPreviewCache();
@@ -2452,6 +2537,8 @@ function onPick(side) {
   const prevRegion = currentMatch(state)?.region;
 
   state = pickWinner(state, side);
+  // Loser's preview URL can leave memory now
+  prunePreviewCache();
   saveProgress({ immediate: true });
 
   if (state.finished) {
@@ -2491,6 +2578,7 @@ function onQuit() {
   loadGeneration += 1;
   clearTransitionTimer();
   roundTransition = null;
+  fadingAudio.clear();
   disposeMedia({ removeTransition: true });
   stopChampionBed();
   destroyAllYouTubePlayers();

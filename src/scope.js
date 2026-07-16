@@ -5,7 +5,12 @@
  */
 
 const FFT_SIZE = 2048;
-const sources = new WeakMap();
+/**
+ * Strong map (not WeakMap): we must disconnect nodes for abandoned <audio>
+ * elements. WeakMap cannot be iterated, so dead MediaElementSource nodes
+ * would stay wired into the graph forever and lag long tournaments.
+ */
+const sources = new Map();
 
 let audioCtx = null;
 let analyser = null;
@@ -102,6 +107,9 @@ export function prepareMediaElement(audio) {
 /**
  * Route an <audio> element through the analyser graph (once per element).
  * After this, playback goes through Web Audio; element.volume still works.
+ *
+ * IMPORTANT: A given <audio> can only ever create one MediaElementSource.
+ * Reuse the same element (change src) instead of creating new elements every match.
  */
 export function connectMediaElement(audio) {
   if (!audio) return false;
@@ -124,6 +132,22 @@ export function connectMediaElement(audio) {
   } catch {
     return false;
   }
+}
+
+/**
+ * Disconnect one element from the Web Audio graph and drop our bookkeeping.
+ * Only call this when the element will never play again (removed from the page).
+ * Do NOT call on the reused match/transition/champion pool players mid-game.
+ */
+export function disconnectMediaElement(audio) {
+  if (!audio) return;
+  const node = sources.get(audio);
+  if (!node) return;
+  try {
+    node.disconnect();
+  } catch {
+  }
+  sources.delete(audio);
 }
 
 export async function resumeAudioContext() {
@@ -292,7 +316,25 @@ export function clearScopeFrame() {
   c2d.clearRect(0, 0, canvas.width, canvas.height);
 }
 
-export function onMediaDisposed() {}
+/**
+ * Tear down graph nodes for <audio> elements that left the document.
+ * Pool players stay in document.body, so they keep their single MediaElementSource.
+ */
+export function onMediaDisposed() {
+  for (const [audio, node] of [...sources.entries()]) {
+    if (audio.isConnected) continue;
+    try {
+      node.disconnect();
+    } catch {
+    }
+    sources.delete(audio);
+  }
+}
+
+/** How many MediaElementSource nodes are still wired (debug / health). */
+export function connectedMediaSourceCount() {
+  return sources.size;
+}
 
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
