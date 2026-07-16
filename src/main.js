@@ -1961,6 +1961,7 @@ function renderResults(gen) {
   `;
 
   document.getElementById('new-game-btn')?.addEventListener('click', onQuit);
+  wireBracketTabs(document.getElementById('bracket-explorer'));
   // Bind UI only — never restart the bed if reveal already started it
   wireChampionBedUi(champion, gen);
   if (isYouTubeTrack(champion)) {
@@ -2032,18 +2033,17 @@ function mmRoundColumn(matches, label, sideClass = '') {
   `;
 }
 
-function buildBracketHtml(history, champion) {
-  if (!history.length) {
-    return '<p class="muted small">No matches recorded.</p>';
-  }
-
-  const initialCount = state?.initialCount || 0;
+function partitionBracketHistory(history) {
   const leftByWave = new Map();
   const rightByWave = new Map();
   const crossByWave = new Map();
   const finals = [];
+  const byRound = new Map();
 
   for (const m of history) {
+    if (!byRound.has(m.round)) byRound.set(m.round, []);
+    byRound.get(m.round).push(m);
+
     if (m.region === 'final') {
       finals.push(m);
       continue;
@@ -2058,61 +2058,54 @@ function buildBracketHtml(history, champion) {
     map.get(m.round).push(m);
   }
 
-  const leftWaves = [...leftByWave.keys()].sort((a, b) => a - b);
-  const rightWaves = [...rightByWave.keys()].sort((a, b) => a - b);
+  return {
+    leftByWave,
+    rightByWave,
+    crossByWave,
+    finals,
+    byRound,
+    leftWaves: [...leftByWave.keys()].sort((a, b) => a - b),
+    rightWaves: [...rightByWave.keys()].sort((a, b) => a - b),
+    roundKeys: [...byRound.keys()].sort((a, b) => a - b),
+  };
+}
 
-  function waveLabel(wave, matches) {
-    const leftN = (leftByWave.get(wave) || []).length;
-    const rightN = (rightByWave.get(wave) || []).length;
-    const crossN = (crossByWave.get(wave) || []).length;
-    // Total songs still in at start of this wave ≈ 2*(left+right matches) + free byes + 2*cross
-    // Approximate from both halves' match counts
-    const approxSongs = (leftN + rightN) * 2 + crossN * 2;
-    if (matches.length === 1 && leftN + rightN + crossN === 1) {
-      return mmRoundLabel(matches, initialCount);
-    }
-    if (approxSongs === 2) return 'Final';
-    if (approxSongs === 4) return 'Semis';
-    if (approxSongs === 8) return 'Quarters';
-    if (approxSongs === 16) return 'Round of 16';
-    if (approxSongs === 32) return 'Round of 32';
-    if (approxSongs === 64) return 'Round of 64';
-    if (wave === Math.min(...[...leftWaves, ...rightWaves, 999]) && initialCount) {
-      return `${initialCount} songs`;
-    }
-    if (approxSongs > 0) return `${approxSongs} songs left`;
+function waveLabelForParts(parts, wave, matches, initialCount) {
+  const leftN = (parts.leftByWave.get(wave) || []).length;
+  const rightN = (parts.rightByWave.get(wave) || []).length;
+  const crossN = (parts.crossByWave.get(wave) || []).length;
+  const approxSongs = (leftN + rightN) * 2 + crossN * 2;
+  if (matches.length === 1 && leftN + rightN + crossN === 1) {
     return mmRoundLabel(matches, initialCount);
   }
+  if (approxSongs === 2) return 'Final';
+  if (approxSongs === 4) return 'Semis';
+  if (approxSongs === 8) return 'Quarters';
+  if (approxSongs === 16) return 'Round of 16';
+  if (approxSongs === 32) return 'Round of 32';
+  if (approxSongs === 64) return 'Round of 64';
+  const allWaves = [...parts.leftWaves, ...parts.rightWaves];
+  if (allWaves.length && wave === Math.min(...allWaves) && initialCount) {
+    return `${initialCount} songs`;
+  }
+  if (approxSongs > 0) return `${approxSongs} songs left`;
+  return mmRoundLabel(matches, initialCount);
+}
 
-  const leftCols = leftWaves
-    .map((w) => {
-      const matches = leftByWave.get(w);
-      return mmRoundColumn(matches, waveLabel(w, matches), 'mm-side-left');
-    })
-    .join('');
+function mmCenterHtml(parts, champion, { includeCross = true, includeFinal = true } = {}) {
+  const finalMatch = parts.finals[parts.finals.length - 1];
+  const crossCols = includeCross
+    ? [...parts.crossByWave.keys()]
+        .sort((a, b) => a - b)
+        .map((w) => mmRoundColumn(parts.crossByWave.get(w), 'Play-in', 'mm-cross-round'))
+        .join('')
+    : '';
 
-  const rightCols = [...rightWaves]
-    .reverse()
-    .map((w) => {
-      const matches = rightByWave.get(w);
-      return mmRoundColumn(matches, waveLabel(w, matches), 'mm-side-right');
-    })
-    .join('');
-
-  const finalMatch = finals[finals.length - 1];
-  const crossCols = [...crossByWave.keys()]
-    .sort((a, b) => a - b)
-    .map((w) => {
-      const matches = crossByWave.get(w);
-      return mmRoundColumn(matches, 'Play-in', 'mm-cross-round');
-    })
-    .join('');
-
-  const centerHtml = `
+  return `
     <div class="mm-center">
       ${crossCols}
       ${
-        finalMatch
+        includeFinal && finalMatch
           ? `
         <div class="mm-round mm-final-round">
           <div class="mm-round-label">Final</div>
@@ -2122,7 +2115,7 @@ function buildBracketHtml(history, champion) {
           : ''
       }
       ${
-        champion
+        includeFinal && champion
           ? `
         <div class="mm-round mm-champ-round">
           <div class="mm-round-label">Champion</div>
@@ -2138,19 +2131,252 @@ function buildBracketHtml(history, champion) {
       }
     </div>
   `;
+}
 
+function densityClass(parts) {
   const maxM = Math.max(
     1,
-    ...[...leftByWave.values(), ...rightByWave.values()].map((x) => x.length)
+    ...[...parts.leftByWave.values(), ...parts.rightByWave.values()].map((x) => x.length),
+    1
   );
-  const density = maxM > 24 ? 'mm-dense' : maxM > 12 ? 'mm-mid' : 'mm-roomy';
+  return maxM > 24 ? 'mm-dense' : maxM > 12 ? 'mm-mid' : 'mm-roomy';
+}
+
+function buildClassicBracketView(parts, champion, initialCount, mode = 'full') {
+  const dens = mode === 'full' ? densityClass(parts) : 'mm-roomy';
+  const waveLabel = (w, matches) => waveLabelForParts(parts, w, matches, initialCount);
+
+  const leftCols = parts.leftWaves
+    .map((w) => mmRoundColumn(parts.leftByWave.get(w), waveLabel(w, parts.leftByWave.get(w)), 'mm-side-left'))
+    .join('');
+
+  const rightCols = [...parts.rightWaves]
+    .reverse()
+    .map((w) =>
+      mmRoundColumn(parts.rightByWave.get(w), waveLabel(w, parts.rightByWave.get(w)), 'mm-side-right')
+    )
+    .join('');
+
+  if (mode === 'left') {
+    return `
+      <div class="mm-bracket-scroll mm-scroll-roomy">
+        <div class="mm-bracket mm-classic ${dens} mm-half-only">
+          <div class="mm-half mm-half-left">${leftCols || '<p class="muted small">No left-half matches.</p>'}</div>
+          ${mmCenterHtml(parts, champion, { includeCross: true, includeFinal: true })}
+        </div>
+      </div>
+    `;
+  }
+  if (mode === 'right') {
+    return `
+      <div class="mm-bracket-scroll mm-scroll-roomy">
+        <div class="mm-bracket mm-classic ${dens} mm-half-only">
+          ${mmCenterHtml(parts, champion, { includeCross: true, includeFinal: true })}
+          <div class="mm-half mm-half-right">${rightCols || '<p class="muted small">No right-half matches.</p>'}</div>
+        </div>
+      </div>
+    `;
+  }
 
   return `
     <div class="mm-bracket-scroll">
-      <div class="mm-bracket mm-classic ${density}">
+      <div class="mm-bracket mm-classic ${dens}">
         <div class="mm-half mm-half-left">${leftCols}</div>
-        ${centerHtml}
+        ${mmCenterHtml(parts, champion)}
         <div class="mm-half mm-half-right">${rightCols}</div>
+      </div>
+    </div>
+  `;
+}
+
+/** Matches the champion won, in order — the path to the crown. */
+function championPathMatches(history, champion) {
+  if (!champion?.id) return [];
+  return history.filter((m) => m.winnerId === champion.id);
+}
+
+function mmPathListHtml(matches, champion) {
+  if (!matches.length) {
+    return '<p class="muted small">No path recorded.</p>';
+  }
+  const rows = matches
+    .map((m, i) => {
+      const aWin = m.winnerId === m.a.id;
+      const winner = aWin ? m.a : m.b;
+      const loser = aWin ? m.b : m.a;
+      const roundName =
+        m.region === 'final'
+          ? 'Final'
+          : m.region === 'cross'
+            ? 'Play-in'
+            : `Wave ${m.round}`;
+      return `
+        <article class="path-step">
+          <div class="path-step-meta">
+            <span class="path-step-num">${i + 1}</span>
+            <span class="path-step-round">${escapeHtml(roundName)}</span>
+          </div>
+          <div class="path-step-body">
+            <div class="path-fighter path-winner">
+              ${mmCoverHtml(winner, 'winner')}
+              <div class="path-fighter-text">
+                <strong>${escapeHtml(winner.name)}</strong>
+                <span>${escapeHtml(winner.artists || '')}</span>
+              </div>
+            </div>
+            <span class="path-vs">beat</span>
+            <div class="path-fighter path-loser">
+              ${mmCoverHtml(loser, 'loser')}
+              <div class="path-fighter-text">
+                <strong>${escapeHtml(loser.name)}</strong>
+                <span>${escapeHtml(loser.artists || '')}</span>
+              </div>
+            </div>
+          </div>
+        </article>
+      `;
+    })
+    .join('');
+
+  return `
+    <div class="path-list">
+      <p class="path-intro muted small">Every match ${escapeHtml(champion?.name || 'the champion')} won on the way up.</p>
+      ${rows}
+      ${
+        champion
+          ? `<div class="path-crown">
+              ${mmCoverHtml(champion, 'winner')}
+              <p>🏆 ${escapeHtml(champion.name)}</p>
+            </div>`
+          : ''
+      }
+    </div>
+  `;
+}
+
+function mmRoundListHtml(parts, initialCount) {
+  if (!parts.roundKeys.length) {
+    return '<p class="muted small">No matches recorded.</p>';
+  }
+
+  const groups = parts.roundKeys
+    .map((round) => {
+      const matches = parts.byRound.get(round) || [];
+      const label =
+        matches.some((m) => m.region === 'final')
+          ? 'Final'
+          : waveLabelForParts(parts, round, matches, initialCount);
+      const items = matches
+        .map((m) => {
+          const aWin = m.winnerId === m.a.id;
+          return `
+            <div class="round-list-match">
+              <div class="round-list-side ${aWin ? 'is-winner' : 'is-loser'}">
+                ${mmCoverHtml(m.a, aWin ? 'winner' : 'loser')}
+                <div class="round-list-text">
+                  <strong>${escapeHtml(m.a.name)}</strong>
+                  <span>${escapeHtml(m.a.artists || '')}</span>
+                </div>
+              </div>
+              <span class="round-list-vs">vs</span>
+              <div class="round-list-side ${aWin ? 'is-loser' : 'is-winner'}">
+                ${mmCoverHtml(m.b, aWin ? 'loser' : 'winner')}
+                <div class="round-list-text">
+                  <strong>${escapeHtml(m.b.name)}</strong>
+                  <span>${escapeHtml(m.b.artists || '')}</span>
+                </div>
+              </div>
+            </div>
+          `;
+        })
+        .join('');
+      return `
+        <div class="round-list-group">
+          <h4 class="round-list-heading">${escapeHtml(label)} <span>${matches.length} match${matches.length === 1 ? '' : 'es'}</span></h4>
+          <div class="round-list-matches">${items}</div>
+        </div>
+      `;
+    })
+    .join('');
+
+  return `<div class="round-list">${groups}</div>`;
+}
+
+function wireBracketTabs(root) {
+  if (!root) return;
+  const tabs = [...root.querySelectorAll('[data-bracket-tab]')];
+  const panels = [...root.querySelectorAll('[data-bracket-panel]')];
+  if (!tabs.length) return;
+
+  const activate = (id) => {
+    tabs.forEach((t) => {
+      const on = t.getAttribute('data-bracket-tab') === id;
+      t.classList.toggle('is-active', on);
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    panels.forEach((p) => {
+      p.hidden = p.getAttribute('data-bracket-panel') !== id;
+    });
+  };
+
+  tabs.forEach((tab) => {
+    tab.addEventListener('click', () => activate(tab.getAttribute('data-bracket-tab')));
+  });
+}
+
+function buildBracketHtml(history, champion) {
+  if (!history.length) {
+    return '<p class="muted small">No matches recorded.</p>';
+  }
+
+  const initialCount = state?.initialCount || 0;
+  const parts = partitionBracketHistory(history);
+  const pathMatches = championPathMatches(history, champion);
+  const defaultTab =
+    history.length > 16 ? 'path' : history.length > 8 ? 'rounds' : 'full';
+
+  const tabs = [
+    { id: 'path', label: 'Path to crown' },
+    { id: 'rounds', label: 'By round' },
+    { id: 'left', label: 'Left half' },
+    { id: 'right', label: 'Right half' },
+    { id: 'full', label: 'Full map' },
+  ];
+
+  const tabBar = tabs
+    .map(
+      (t) => `
+      <button
+        type="button"
+        class="bracket-tab${t.id === defaultTab ? ' is-active' : ''}"
+        data-bracket-tab="${t.id}"
+        role="tab"
+        aria-selected="${t.id === defaultTab ? 'true' : 'false'}"
+      >${escapeHtml(t.label)}</button>
+    `
+    )
+    .join('');
+
+  return `
+    <div class="bracket-explorer" id="bracket-explorer">
+      <div class="bracket-tabs" role="tablist" aria-label="Bracket views">${tabBar}</div>
+      <div class="bracket-panels">
+        <div class="bracket-panel" data-bracket-panel="path" role="tabpanel" ${defaultTab === 'path' ? '' : 'hidden'}>
+          ${mmPathListHtml(pathMatches, champion)}
+        </div>
+        <div class="bracket-panel" data-bracket-panel="rounds" role="tabpanel" ${defaultTab === 'rounds' ? '' : 'hidden'}>
+          ${mmRoundListHtml(parts, initialCount)}
+        </div>
+        <div class="bracket-panel" data-bracket-panel="left" role="tabpanel" ${defaultTab === 'left' ? '' : 'hidden'}>
+          ${buildClassicBracketView(parts, champion, initialCount, 'left')}
+        </div>
+        <div class="bracket-panel" data-bracket-panel="right" role="tabpanel" ${defaultTab === 'right' ? '' : 'hidden'}>
+          ${buildClassicBracketView(parts, champion, initialCount, 'right')}
+        </div>
+        <div class="bracket-panel" data-bracket-panel="full" role="tabpanel" ${defaultTab === 'full' ? '' : 'hidden'}>
+          <p class="bracket-hint muted small">Scroll sideways for the full map. For big playlists, try Path or By round.</p>
+          ${buildClassicBracketView(parts, champion, initialCount, 'full')}
+        </div>
       </div>
     </div>
   `;
