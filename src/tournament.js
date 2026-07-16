@@ -102,9 +102,39 @@ function buildRegionState(songs, region, byeCounts) {
   };
 }
 
-function flattenMatches(left, right, finalMatch) {
+function resolveDualByes(left, right, byeCounts) {
+  let nextLeft = { ...left };
+  let nextRight = { ...right };
+  let nextByeCounts = byeCounts;
+  let crossMatch = null;
+
+  if (nextLeft.bye && nextRight.bye) {
+    crossMatch = {
+      id: `cross-${nextLeft.bye.id}-vs-${nextRight.bye.id}`,
+      a: nextLeft.bye,
+      b: nextRight.bye,
+      region: 'cross',
+    };
+    nextLeft = { ...nextLeft, bye: null };
+    nextRight = { ...nextRight, bye: null };
+  } else {
+    nextByeCounts = noteBye(nextByeCounts, nextLeft.bye);
+    nextByeCounts = noteBye(nextByeCounts, nextRight.bye);
+  }
+
+  return {
+    left: nextLeft,
+    right: nextRight,
+    byeCounts: nextByeCounts,
+    crossMatch,
+  };
+}
+
+function flattenMatches(left, right, finalMatch, crossMatch) {
   if (finalMatch) return [finalMatch];
-  return [...(left.matches || []), ...(right.matches || [])];
+  const list = [...(left.matches || []), ...(right.matches || [])];
+  if (crossMatch) list.push(crossMatch);
+  return list;
 }
 
 function totalRemaining(left, right, finalMatch) {
@@ -114,21 +144,58 @@ function totalRemaining(left, right, finalMatch) {
   return l + r;
 }
 
+function regionFromAdvancers(region, advancers, byeCounts) {
+  if (advancers.length <= 1) {
+    return {
+      region,
+      songs: advancers,
+      matches: [],
+      bye: null,
+      winners: [],
+      champion: advancers[0] || null,
+      byeCounts,
+    };
+  }
+  const built = buildRound(advancers, byeCounts);
+  return {
+    region,
+    songs: advancers,
+    matches: built.matches.map((m) => ({ ...m, region })),
+    bye: built.bye,
+    winners: [],
+    champion: null,
+    byeCounts,
+  };
+}
+
+function collectAdvancers(regionState, crossWinner, preferLeftForCross) {
+  let list = regionState.champion
+    ? [regionState.champion]
+    : regionState.bye
+      ? [...regionState.winners, regionState.bye]
+      : [...(regionState.winners || [])];
+  return list;
+}
+
 export function createTournament(playlist, tracks, seeding) {
   const ordered = seeding === 'shuffle' ? shuffle(tracks) : [...tracks];
   const { left: leftSongs, right: rightSongs } = splitRegions(ordered);
 
   let byeCounts = new Map();
-  const left = buildRegionState(leftSongs, 'left', byeCounts);
-  byeCounts = noteBye(byeCounts, left.bye);
-  const right = buildRegionState(rightSongs, 'right', byeCounts);
-  byeCounts = noteBye(byeCounts, right.bye);
+  let left = buildRegionState(leftSongs, 'left', byeCounts);
+  let right = buildRegionState(rightSongs, 'right', byeCounts);
+
+  const resolved = resolveDualByes(left, right, byeCounts);
+  left = resolved.left;
+  right = resolved.right;
+  byeCounts = resolved.byeCounts;
+  const crossMatch = resolved.crossMatch;
 
   if (left.champion && !rightSongs.length) {
-    return finishedState(playlist, ordered, left, right, byeCounts, left.champion);
+    return finishedState(playlist, ordered, left, right, byeCounts, left.champion, seeding);
   }
   if (right.champion && !leftSongs.length) {
-    return finishedState(playlist, ordered, left, right, byeCounts, right.champion);
+    return finishedState(playlist, ordered, left, right, byeCounts, right.champion, seeding);
   }
 
   let finalMatch = null;
@@ -140,8 +207,6 @@ export function createTournament(playlist, tracks, seeding) {
       region: 'final',
     };
   }
-
-  const matches = flattenMatches(left, right, finalMatch);
 
   return {
     playlist: {
@@ -158,12 +223,12 @@ export function createTournament(playlist, tracks, seeding) {
     left,
     right,
     finalMatch,
-
-    matches,
+    crossMatch,
+    crossWinner: null,
+    matches: flattenMatches(left, right, finalMatch, crossMatch),
     matchIndex: 0,
     roundNumber: 1,
     remaining: totalRemaining(left, right, finalMatch),
-
     bye: left.bye || right.bye,
     winners: [],
     champion: null,
@@ -171,7 +236,7 @@ export function createTournament(playlist, tracks, seeding) {
   };
 }
 
-function finishedState(playlist, ordered, left, right, byeCounts, champion) {
+function finishedState(playlist, ordered, left, right, byeCounts, champion, seeding = 'order') {
   return {
     playlist: {
       id: playlist.id,
@@ -180,13 +245,15 @@ function finishedState(playlist, ordered, left, right, byeCounts, champion) {
       spotifyUrl: playlist.spotifyUrl,
       owner: playlist.owner,
     },
-    seeding: 'order',
+    seeding,
     initialCount: ordered.length,
     history: [],
     byeCounts,
     left,
     right,
     finalMatch: null,
+    crossMatch: null,
+    crossWinner: null,
     matches: [],
     matchIndex: 0,
     roundNumber: 1,
@@ -200,80 +267,73 @@ function finishedState(playlist, ordered, left, right, byeCounts, champion) {
 
 function advanceRegions(state) {
   let byeCounts = new Map(state.byeCounts || []);
-  let left = { ...state.left };
-  let right = { ...state.right };
 
-  if (!left.champion) {
-    const leftAdvancers = left.bye
-      ? [...left.winners, left.bye]
-      : [...left.winners];
-    if (leftAdvancers.length <= 1) {
-      left = {
-        ...left,
-        songs: leftAdvancers,
-        matches: [],
-        bye: null,
-        winners: [],
-        champion: leftAdvancers[0] || null,
-      };
+  let leftList = collectAdvancers(state.left);
+  let rightList = collectAdvancers(state.right);
+
+  if (state.crossWinner) {
+    if (leftList.length <= rightList.length) {
+      leftList = [...leftList, state.crossWinner];
     } else {
-      const built = buildRound(leftAdvancers, byeCounts);
-      byeCounts = noteBye(byeCounts, built.bye);
-      left = {
-        region: 'left',
-        songs: leftAdvancers,
-        matches: built.matches.map((m) => ({ ...m, region: 'left' })),
-        bye: built.bye,
-        winners: [],
-        champion: null,
-      };
+      rightList = [...rightList, state.crossWinner];
     }
   }
 
-  if (!right.champion) {
-    const rightAdvancers = right.bye
-      ? [...right.winners, right.bye]
-      : [...right.winners];
-    if (rightAdvancers.length <= 1) {
-      right = {
-        ...right,
-        songs: rightAdvancers,
-        matches: [],
-        bye: null,
-        winners: [],
-        champion: rightAdvancers[0] || null,
-      };
-    } else {
-      const built = buildRound(rightAdvancers, byeCounts);
-      byeCounts = noteBye(byeCounts, built.bye);
-      right = {
-        region: 'right',
-        songs: rightAdvancers,
-        matches: built.matches.map((m) => ({ ...m, region: 'right' })),
-        bye: built.bye,
-        winners: [],
-        champion: null,
-      };
-    }
-  }
+  const leftBuilt = regionFromAdvancers('left', leftList, byeCounts);
+  byeCounts = leftBuilt.byeCounts || byeCounts;
+  let left = {
+    region: 'left',
+    songs: leftBuilt.songs,
+    matches: leftBuilt.matches,
+    bye: leftBuilt.bye,
+    winners: [],
+    champion: leftBuilt.champion,
+  };
 
-  let finalMatch = null;
+  const rightBuilt = regionFromAdvancers('right', rightList, byeCounts);
+  byeCounts = rightBuilt.byeCounts || byeCounts;
+  let right = {
+    region: 'right',
+    songs: rightBuilt.songs,
+    matches: rightBuilt.matches,
+    bye: rightBuilt.bye,
+    winners: [],
+    champion: rightBuilt.champion,
+  };
+
   if (left.champion && right.champion) {
-    finalMatch = {
+    const finalMatch = {
       id: `final-${left.champion.id}-vs-${right.champion.id}`,
       a: left.champion,
       b: right.champion,
       region: 'final',
     };
+    return {
+      ...state,
+      left,
+      right,
+      byeCounts,
+      finalMatch,
+      crossMatch: null,
+      crossWinner: null,
+      matches: [finalMatch],
+      matchIndex: 0,
+      roundNumber: state.roundNumber + 1,
+      remaining: 2,
+      bye: null,
+      winners: [],
+    };
   }
 
-  if (left.champion && !right.champion && right.songs?.length === 0) {
+  if (left.champion && right.songs.length === 0) {
     return {
       ...state,
       left,
       right,
       byeCounts,
       finalMatch: null,
+      crossMatch: null,
+      crossWinner: null,
       matches: [],
       matchIndex: 0,
       champion: left.champion,
@@ -283,13 +343,15 @@ function advanceRegions(state) {
       winners: [],
     };
   }
-  if (right.champion && !left.champion && left.songs?.length === 0) {
+  if (right.champion && left.songs.length === 0) {
     return {
       ...state,
       left,
       right,
       byeCounts,
       finalMatch: null,
+      crossMatch: null,
+      crossWinner: null,
       matches: [],
       matchIndex: 0,
       champion: right.champion,
@@ -300,18 +362,47 @@ function advanceRegions(state) {
     };
   }
 
-  const matches = flattenMatches(left, right, finalMatch);
+  const resolved = resolveDualByes(left, right, byeCounts);
+  left = resolved.left;
+  right = resolved.right;
+  byeCounts = resolved.byeCounts;
+
+  if (left.champion && right.champion) {
+    const finalMatch = {
+      id: `final-${left.champion.id}-vs-${right.champion.id}`,
+      a: left.champion,
+      b: right.champion,
+      region: 'final',
+    };
+    return {
+      ...state,
+      left,
+      right,
+      byeCounts,
+      finalMatch,
+      crossMatch: null,
+      crossWinner: null,
+      matches: [finalMatch],
+      matchIndex: 0,
+      roundNumber: state.roundNumber + 1,
+      remaining: 2,
+      bye: null,
+      winners: [],
+    };
+  }
 
   return {
     ...state,
     left,
     right,
     byeCounts,
-    finalMatch,
-    matches,
+    finalMatch: null,
+    crossMatch: resolved.crossMatch,
+    crossWinner: null,
+    matches: flattenMatches(left, right, null, resolved.crossMatch),
     matchIndex: 0,
     roundNumber: state.roundNumber + 1,
-    remaining: totalRemaining(left, right, finalMatch),
+    remaining: totalRemaining(left, right, null),
     bye: left.bye || right.bye,
     winners: [],
   };
@@ -327,17 +418,21 @@ export function pickWinner(state, side) {
 
   let left = { ...state.left, winners: [...(state.left.winners || [])] };
   let right = { ...state.right, winners: [...(state.right.winners || [])] };
+  let crossWinner = state.crossWinner || null;
 
   if (region === 'left') {
     left.winners = [...left.winners, winner];
   } else if (region === 'right') {
     right.winners = [...right.winners, winner];
+  } else if (region === 'cross') {
+    crossWinner = winner;
   }
 
   const next = {
     ...state,
     left,
     right,
+    crossWinner,
     history: [
       ...state.history,
       {
@@ -360,6 +455,8 @@ export function pickWinner(state, side) {
       finished: true,
       matches: [],
       finalMatch: null,
+      crossMatch: null,
+      crossWinner: null,
       remaining: 1,
       bye: null,
       winners: [],
@@ -388,10 +485,6 @@ export function progress(state) {
   const match = currentMatch(state);
   const region = match?.region;
 
-  const byes = [];
-  if (state.left?.bye) byes.push({ region: 'left', song: state.left.bye });
-  if (state.right?.bye) byes.push({ region: 'right', song: state.right.bye });
-
   let label = roundLabel(state.remaining);
   if (region === 'final') {
     label = 'Final';
@@ -409,9 +502,9 @@ export function progress(state) {
     matchesInRound: totalMatchesThisWave,
     completedMatches: completedHistory,
     approxTotalMatches,
-    hasBye: byes.length > 0,
-    byeSong: byes[0]?.song || null,
-    byes,
+    hasBye: false,
+    byeSong: null,
+    byes: [],
     region: region || null,
   };
 }

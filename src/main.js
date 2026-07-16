@@ -717,11 +717,17 @@ function buildBracketHtml(history, champion) {
 
   const leftByWave = new Map();
   const rightByWave = new Map();
+  const crossByWave = new Map();
   const finals = [];
 
   for (const m of history) {
     if (m.region === 'final') {
       finals.push(m);
+      continue;
+    }
+    if (m.region === 'cross') {
+      if (!crossByWave.has(m.round)) crossByWave.set(m.round, []);
+      crossByWave.get(m.round).push(m);
       continue;
     }
     const map = m.region === 'right' ? rightByWave : leftByWave;
@@ -748,8 +754,17 @@ function buildBracketHtml(history, champion) {
     .join('');
 
   const finalMatch = finals[finals.length - 1];
+  const crossCols = [...crossByWave.keys()]
+    .sort((a, b) => a - b)
+    .map((w) => {
+      const matches = crossByWave.get(w);
+      return mmRoundColumn(matches, 'Play-in', 'mm-cross-round');
+    })
+    .join('');
+
   const centerHtml = `
     <div class="mm-center">
+      ${crossCols}
       ${
         finalMatch
           ? `
