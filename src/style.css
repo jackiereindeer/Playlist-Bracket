@@ -2875,9 +2875,9 @@ body[data-stage='quarters'] .vs-badge {
 }
 
 .results-meta-toggle.is-off {
-  opacity: 0.35;
-  text-decoration: line-through;
-  text-decoration-color: color-mix(in srgb, var(--muted) 70%, transparent);
+  opacity: 0.38;
+  color: color-mix(in srgb, var(--muted) 55%, var(--bg));
+  text-decoration: none;
 }
 
 .rating-results-grid {
