@@ -186,9 +186,8 @@ function drawFrame(now) {
   const w = canvas.width;
   const h = canvas.height;
 
-  // Phosphor trail
-  c2d.fillStyle = 'rgba(12, 11, 16, 0.22)';
-  c2d.fillRect(0, 0, w, h);
+  // Fully clear — no dark fill overlay (that read as a transparent barrier)
+  c2d.clearRect(0, 0, w, h);
 
   const color = scopeColor();
   const midY = h * 0.5;
