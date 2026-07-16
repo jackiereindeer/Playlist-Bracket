@@ -912,51 +912,132 @@ body.on-setup {
   width: 100%;
 }
 
-/* YouTube iframe sits under the cover art; fades in while playing */
+/* —— YouTube miniplayer in the song card —— */
+.yt-mini {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: #0a0a0c;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+
 .yt-host {
   position: absolute;
   inset: 0;
   z-index: 0;
-  border-radius: var(--radius-sm);
   overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
   background: #000;
 }
 
 .yt-host iframe {
+  position: absolute !important;
+  inset: 0 !important;
   width: 100% !important;
   height: 100% !important;
-  border: 0;
+  border: 0 !important;
+  pointer-events: none; /* click goes to our overlay button */
 }
 
-.cover-player-yt .cover-play-btn {
-  z-index: 1;
+/* Transparent play/pause overlay on top of the video */
+.yt-play-overlay {
+  position: absolute !important;
+  inset: 0 !important;
+  z-index: 2;
+  width: 100% !important;
+  height: 100% !important;
+  aspect-ratio: auto !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
 }
 
-.cover-player-yt.is-yt-playing .yt-host {
-  opacity: 1;
-}
-
-.cover-player-yt.is-yt-playing .cover-art {
-  opacity: 0;
+.yt-play-overlay .cover-art {
   transition: opacity 0.2s ease;
 }
 
-.cover-player-yt.is-yt-playing .cover-play-icon {
-  opacity: 0.85;
+.cover-player-yt.is-yt-playing .yt-play-overlay {
+  background: transparent !important;
+  box-shadow: none !important;
 }
 
-/* Off-screen hosts for champion bed / transition stingers */
-.yt-bed-host {
-  position: fixed;
-  width: 1px;
-  height: 1px;
-  left: -9999px;
-  top: 0;
-  overflow: hidden;
+.cover-player-yt.is-yt-playing .yt-play-overlay .cover-art {
   opacity: 0;
   pointer-events: none;
+}
+
+.cover-player-yt.is-yt-playing .yt-play-overlay .cover-play-icon {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.cover-player-yt.is-yt-playing .yt-play-overlay:hover .cover-play-icon {
+  opacity: 0.9;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.8);
+}
+
+/* Floating corner miniplayer (champion / transition when no card host) */
+.yt-float-mini {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 80;
+  width: min(280px, 42vw);
+  border-radius: 14px;
+  overflow: hidden;
+  background: #0a0a0c;
+  box-shadow:
+    0 12px 40px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.08);
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
+}
+
+.yt-float-mini-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(12px) scale(0.96);
+}
+
+.yt-float-frame {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+}
+
+.yt-float-frame .yt-host {
+  position: absolute;
+  inset: 0;
+}
+
+.yt-float-frame .yt-host iframe {
+  pointer-events: auto; /* allow YouTube controls in float if needed */
+}
+
+.yt-float-close {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
+  z-index: 2;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.yt-float-close:hover {
+  background: rgba(0, 0, 0, 0.85);
+  transform: none;
 }
 
 .cover-play-btn {

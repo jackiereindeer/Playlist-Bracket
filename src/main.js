@@ -428,10 +428,13 @@ function championBedIsPlaying(songId) {
 function stopChampionBed() {
   championBedLoad = null;
   destroyYouTubePlayer('champion-bed');
-  const host = document.getElementById('yt-champion-bed');
-  if (host?.parentNode) {
+  destroyYouTubePlayer('champion');
+  hideYouTubeFloat('champion-bed');
+  hideYouTubeFloat('transition');
+  const shell = document.getElementById('yt-shell-champion-bed');
+  if (shell?.parentNode) {
     try {
-      host.parentNode.removeChild(host);
+      shell.parentNode.removeChild(shell);
     } catch {
     }
   }
@@ -450,16 +453,45 @@ function stopChampionBed() {
   }
 }
 
-function ensureYouTubeBedHost() {
-  let host = document.getElementById('yt-champion-bed');
-  if (!host) {
-    host = document.createElement('div');
-    host.id = 'yt-champion-bed';
-    host.className = 'yt-bed-host';
-    host.setAttribute('aria-hidden', 'true');
-    document.body.appendChild(host);
+/**
+ * Prefer a visible on-page host (match/results miniplayer). Fall back to a
+ * fixed corner miniplayer so champion/transition audio still has a home.
+ */
+function ensureYouTubeHost(side, { visibleMini = false } = {}) {
+  let host = document.getElementById(`yt-${side}`);
+  if (host) return host;
+
+  // Corner floating miniplayer (champion bed / transition)
+  let shell = document.getElementById(`yt-shell-${side}`);
+  if (!shell) {
+    shell = document.createElement('div');
+    shell.id = `yt-shell-${side}`;
+    shell.className = visibleMini
+      ? 'yt-float-mini'
+      : 'yt-float-mini yt-float-mini-hidden';
+    shell.innerHTML = `
+      <div class="yt-float-frame">
+        <div class="yt-host" id="yt-${side}"></div>
+      </div>
+      <button type="button" class="yt-float-close" data-yt-close="${side}" aria-label="Hide video">×</button>
+    `;
+    document.body.appendChild(shell);
+    shell.querySelector('[data-yt-close]')?.addEventListener('click', () => {
+      shell.classList.add('yt-float-mini-hidden');
+    });
   }
-  return host;
+  if (visibleMini) shell.classList.remove('yt-float-mini-hidden');
+  return document.getElementById(`yt-${side}`);
+}
+
+function showYouTubeFloat(side) {
+  const shell = document.getElementById(`yt-shell-${side}`);
+  if (shell) shell.classList.remove('yt-float-mini-hidden');
+}
+
+function hideYouTubeFloat(side) {
+  const shell = document.getElementById(`yt-shell-${side}`);
+  if (shell) shell.classList.add('yt-float-mini-hidden');
 }
 
 /**
@@ -550,21 +582,28 @@ function playChampionBedYouTube(song, vol) {
   const vid = youtubeVideoId(song);
   if (!vid) return Promise.resolve(null);
 
-  // Already playing this video on the bed
-  if (youtubeIsPlaying('champion-bed') && championBedLoad?.id === song.id) {
-    setYouTubeVolume('champion-bed', vol);
+  // Prefer visible results miniplayer if present; else floating corner player
+  const preferredSide = document.getElementById('yt-champion')
+    ? 'champion'
+    : 'champion-bed';
+
+  if (youtubeIsPlaying(preferredSide) && championBedLoad?.id === song.id) {
+    setYouTubeVolume(preferredSide, vol);
+    if (preferredSide === 'champion-bed') showYouTubeFloat('champion-bed');
     return Promise.resolve(true);
   }
 
   if (championBedLoad?.id === song.id && championBedLoad.promise) {
     return championBedLoad.promise.then(() => {
-      setYouTubeVolume('champion-bed', vol);
+      setYouTubeVolume(preferredSide, vol);
       return true;
     });
   }
 
-  ensureYouTubeBedHost();
-  // Stop HTML champion bed audio so they don't stack
+  if (preferredSide === 'champion-bed') {
+    ensureYouTubeHost('champion-bed', { visibleMini: true });
+  }
+
   const audio = document.getElementById('audio-champion-bed');
   if (audio) {
     try {
@@ -576,13 +615,19 @@ function playChampionBedYouTube(song, vol) {
   }
 
   pauseAllHtmlAudioExcept(null);
-  pauseAllYouTubeExcept('champion-bed');
+  pauseAllYouTubeExcept(preferredSide);
 
-  const promise = mountYouTubePlayer('champion-bed', vid, {
+  const promise = mountYouTubePlayer(preferredSide, vid, {
     volume01: vol,
     autoplay: true,
+    onPlaying: () => {
+      if (preferredSide === 'champion-bed') showYouTubeFloat('champion-bed');
+      const cover = document.getElementById('cover-player-champion');
+      if (cover) cover.classList.add('is-yt-playing');
+    },
   }).then((p) => {
-    setYouTubeVolume('champion-bed', vol);
+    setYouTubeVolume(preferredSide, vol);
+    if (preferredSide === 'champion-bed') showYouTubeFloat('champion-bed');
     return p;
   });
 
@@ -608,20 +653,14 @@ function playAutoPreview(song, volume, gen) {
   if (isYouTubeTrack(song)) {
     const vid = youtubeVideoId(song);
     if (!vid) return;
-    let host = document.getElementById('yt-transition');
-    if (!host) {
-      host = document.createElement('div');
-      host.id = 'yt-transition';
-      host.className = 'yt-bed-host';
-      host.setAttribute('aria-hidden', 'true');
-      document.body.appendChild(host);
-    }
+    ensureYouTubeHost('transition', { visibleMini: true });
     if (gen !== renderGeneration) return;
     pauseAllHtmlAudioExcept(null);
     pauseAllYouTubeExcept('transition');
     mountYouTubePlayer('transition', vid, {
       volume01: vol,
       autoplay: true,
+      onPlaying: () => showYouTubeFloat('transition'),
     }).catch(() => {});
     return;
   }
@@ -961,9 +1000,20 @@ function songCardHtml(song, side) {
       <div class="cover-player${yt ? ' cover-player-yt' : ''}" id="cover-player-${side}">
         ${
           yt
-            ? `<div class="yt-host" id="yt-${side}"></div>`
-            : `<audio id="audio-${side}" preload="none"></audio>`
-        }
+            ? `<div class="yt-mini" id="yt-mini-${side}">
+                <div class="yt-host" id="yt-${side}"></div>
+                <button
+                  type="button"
+                  class="cover-play-btn yt-play-overlay"
+                  id="play-${side}"
+                  aria-label="Play ${escapeHtml(song.name)}"
+                  disabled
+                >
+                  <span class="cover-art">${art}</span>
+                  <span class="cover-play-icon" id="play-icon-${side}" aria-hidden="true">▶</span>
+                </button>
+              </div>`
+            : `<audio id="audio-${side}" preload="none"></audio>
         <button
           type="button"
           class="cover-play-btn"
@@ -973,7 +1023,8 @@ function songCardHtml(song, side) {
         >
           <span class="cover-art">${art}</span>
           <span class="cover-play-icon" id="play-icon-${side}" aria-hidden="true">▶</span>
-        </button>
+        </button>`
+        }
         <p class="preview-status small muted" id="status-${side}" hidden></p>
       </div>
       <button
@@ -1383,14 +1434,17 @@ function wireChampionBedUi(champion, gen) {
     });
   }
 
+  const ytSide = () =>
+    document.getElementById('yt-champion') ? 'champion' : 'champion-bed';
+
   const syncUi = () => {
     if (!stillCurrent(gen, playBtn)) return;
-    if (yt) setPlayingUi('champion', youtubeIsPlaying('champion-bed'));
+    if (yt) setPlayingUi('champion', youtubeIsPlaying(ytSide()));
     else if (audio) setPlayingUi('champion', !audio.paused && !audio.ended);
   };
 
   const alreadyGoing = yt
-    ? youtubeIsPlaying('champion-bed')
+    ? youtubeIsPlaying('champion') || youtubeIsPlaying('champion-bed')
     : championBedIsPlaying(champion.id);
 
   if (alreadyGoing) {
@@ -1425,15 +1479,16 @@ function wireChampionBedUi(champion, gen) {
   playBtn.onclick = async () => {
     if (!stillCurrent(gen, playBtn)) return;
     if (yt) {
-      if (youtubeIsPlaying('champion-bed')) {
-        pauseYouTube('champion-bed');
+      const ytSide = document.getElementById('yt-champion') ? 'champion' : 'champion-bed';
+      if (youtubeIsPlaying(ytSide)) {
+        pauseYouTube(ytSide);
         setPlayingUi('champion', false);
         return;
       }
       pauseAllHtmlAudioExcept(null);
-      pauseAllYouTubeExcept('champion-bed');
-      setYouTubeVolume('champion-bed', volumeForTrack(champion.id, vol));
-      await playYouTube('champion-bed');
+      pauseAllYouTubeExcept(ytSide);
+      setYouTubeVolume(ytSide, volumeForTrack(champion.id, vol));
+      await playYouTube(ytSide);
       if (stillCurrent(gen, playBtn)) setPlayingUi('champion', true);
       return;
     }
@@ -1518,18 +1573,36 @@ function renderResults(gen) {
         <div class="cover-player champion-cover${isYouTubeTrack(champion) ? ' cover-player-yt' : ''}" id="cover-player-champion">
           ${
             isYouTubeTrack(champion)
-              ? `<div class="yt-host yt-host-inline" id="yt-champion"></div>`
-              : `<audio id="audio-champion" preload="none"></audio>`
-          }
+              ? `<div class="yt-mini" id="yt-mini-champion">
+                  <div class="yt-host" id="yt-champion"></div>
+                  <button
+                    type="button"
+                    class="cover-play-btn yt-play-overlay${
+                      youtubeIsPlaying('champion') || youtubeIsPlaying('champion-bed')
+                        ? ' is-playing'
+                        : ''
+                    }"
+                    id="play-champion"
+                    aria-label="Play or pause ${escapeHtml(champion.name)}"
+                  >
+                    <span class="cover-art">
+                      ${
+                        champion.image
+                          ? `<img class="cover-art-img" src="${escapeHtml(champion.image)}" alt="" />`
+                          : `<div class="cover-art-fallback" aria-hidden="true">▶</div>`
+                      }
+                    </span>
+                    <span class="cover-play-icon" id="play-icon-champion" aria-hidden="true">${
+                      youtubeIsPlaying('champion') || youtubeIsPlaying('champion-bed')
+                        ? '❚❚'
+                        : '▶'
+                    }</span>
+                  </button>
+                </div>`
+              : `<audio id="audio-champion" preload="none"></audio>
           <button
             type="button"
-            class="cover-play-btn${
-              (isYouTubeTrack(champion)
-                ? youtubeIsPlaying('champion-bed')
-                : championBedIsPlaying(champion.id))
-                ? ' is-playing'
-                : ''
-            }"
+            class="cover-play-btn${championBedIsPlaying(champion.id) ? ' is-playing' : ''}"
             id="play-champion"
             aria-label="Play or pause ${escapeHtml(champion.name)}"
           >
@@ -1537,15 +1610,14 @@ function renderResults(gen) {
               ${
                 champion.image
                   ? `<img class="cover-art-img" src="${escapeHtml(champion.image)}" alt="" />`
-                  : `<div class="cover-art-fallback" aria-hidden="true">${isYouTubeTrack(champion) ? '▶' : '🎵'}</div>`
+                  : `<div class="cover-art-fallback" aria-hidden="true">🎵</div>`
               }
             </span>
             <span class="cover-play-icon" id="play-icon-champion" aria-hidden="true">${
-              (isYouTubeTrack(champion) ? youtubeIsPlaying('champion-bed') : championBedIsPlaying(champion.id))
-                ? '❚❚'
-                : '▶'
+              championBedIsPlaying(champion.id) ? '❚❚' : '▶'
             }</span>
-          </button>
+          </button>`
+          }
           <p class="preview-status small muted" id="status-champion" hidden></p>
         </div>
       </div>
