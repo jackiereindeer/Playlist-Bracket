@@ -1485,6 +1485,59 @@ body.on-setup {
   animation: roundIn 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+.champ-reveal {
+  gap: 1rem;
+}
+
+.champ-reveal-kicker {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+  animation: fadeUp 0.5s ease both;
+}
+
+.champ-reveal-frame {
+  width: min(72vw, 260px);
+  aspect-ratio: 1;
+  border-radius: 18px;
+  overflow: hidden;
+  border: 2px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent),
+    0 18px 50px rgba(0, 0, 0, 0.45),
+    0 0 40px color-mix(in srgb, var(--accent) 28%, transparent);
+  animation: titlePop 0.7s 0.1s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.champ-reveal-art {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.champ-reveal-fallback {
+  background:
+    radial-gradient(circle at 30% 30%, color-mix(in srgb, var(--accent) 45%, transparent), transparent 55%),
+    var(--surface-2);
+}
+
+.champ-reveal-title {
+  max-width: min(90vw, 420px);
+  animation: titlePop 0.65s 0.25s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.champ-reveal-artist {
+  margin-top: 0;
+  text-transform: none;
+  letter-spacing: 0.02em;
+  font-weight: 600;
+  animation: fadeUp 0.55s 0.35s ease both;
+}
+
 .round-transition-divider {
   width: 56px;
   height: 4px;

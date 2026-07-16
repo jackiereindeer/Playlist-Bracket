@@ -319,6 +319,26 @@ function renderRoundTransition() {
   const t = roundTransition;
   if (!t) return;
   const stage = stageFromRemaining(t.remaining);
+  const isChampion = Boolean(t.champion);
+
+  if (isChampion) {
+    const c = t.champion;
+    const art = c.image
+      ? `<img class="champ-reveal-art" src="${escapeHtml(c.image)}" alt="" />`
+      : `<div class="champ-reveal-art champ-reveal-fallback" aria-hidden="true"></div>`;
+    app.innerHTML = `
+      <div class="round-transition champ-reveal stage-${escapeHtml(stage)}" role="status" aria-live="polite">
+        <p class="champ-reveal-kicker">Champion</p>
+        <div class="champ-reveal-frame">
+          ${art}
+        </div>
+        <p class="round-transition-to champ-reveal-title">${escapeHtml(c.name)}</p>
+        <p class="round-transition-sub champ-reveal-artist">${escapeHtml(c.artists || '')}</p>
+      </div>
+    `;
+    return;
+  }
+
   app.innerHTML = `
     <div class="round-transition stage-${escapeHtml(stage)}" role="status" aria-live="polite">
       <div class="round-transition-divider" aria-hidden="true"></div>
@@ -680,13 +700,19 @@ function renderResults(gen) {
   wireOnePlayer('champion', champion, 'a', gen);
 }
 
-function mmRoundLabel(matches) {
+function mmRoundLabel(matches, initialCount) {
   if (matches.length === 1) return 'Final';
   if (matches.length === 2) return 'Semis';
   if (matches.length === 4) return 'Quarters';
-  if (matches.length === 8) return 'Round of 8';
-  const songsInRound = matches.length * 2;
-  return `${songsInRound} songs`;
+  if (matches.length === 8) return 'Round of 16';
+  if (matches.length === 16) return 'Round of 32';
+  if (matches.length === 32) return 'Round of 64';
+  // Column is one half of a wave — estimate total field from both halves when possible
+  const songsThisColumn = matches.length * 2;
+  if (initialCount && songsThisColumn * 2 >= initialCount - 2) {
+    return `${initialCount} songs`;
+  }
+  return `${songsThisColumn} songs`;
 }
 
 function mmCoverHtml(song, role) {
@@ -735,6 +761,7 @@ function buildBracketHtml(history, champion) {
     return '<p class="muted small">No matches recorded.</p>';
   }
 
+  const initialCount = state?.initialCount || 0;
   const leftByWave = new Map();
   const rightByWave = new Map();
   const crossByWave = new Map();
@@ -758,10 +785,33 @@ function buildBracketHtml(history, champion) {
   const leftWaves = [...leftByWave.keys()].sort((a, b) => a - b);
   const rightWaves = [...rightByWave.keys()].sort((a, b) => a - b);
 
+  function waveLabel(wave, matches) {
+    const leftN = (leftByWave.get(wave) || []).length;
+    const rightN = (rightByWave.get(wave) || []).length;
+    const crossN = (crossByWave.get(wave) || []).length;
+    // Total songs still in at start of this wave ≈ 2*(left+right matches) + free byes + 2*cross
+    // Approximate from both halves' match counts
+    const approxSongs = (leftN + rightN) * 2 + crossN * 2;
+    if (matches.length === 1 && leftN + rightN + crossN === 1) {
+      return mmRoundLabel(matches, initialCount);
+    }
+    if (approxSongs === 2) return 'Final';
+    if (approxSongs === 4) return 'Semis';
+    if (approxSongs === 8) return 'Quarters';
+    if (approxSongs === 16) return 'Round of 16';
+    if (approxSongs === 32) return 'Round of 32';
+    if (approxSongs === 64) return 'Round of 64';
+    if (wave === Math.min(...[...leftWaves, ...rightWaves, 999]) && initialCount) {
+      return `${initialCount} songs`;
+    }
+    if (approxSongs > 0) return `${approxSongs} songs left`;
+    return mmRoundLabel(matches, initialCount);
+  }
+
   const leftCols = leftWaves
     .map((w) => {
       const matches = leftByWave.get(w);
-      return mmRoundColumn(matches, mmRoundLabel(matches), 'mm-side-left');
+      return mmRoundColumn(matches, waveLabel(w, matches), 'mm-side-left');
     })
     .join('');
 
@@ -769,7 +819,7 @@ function buildBracketHtml(history, champion) {
     .reverse()
     .map((w) => {
       const matches = rightByWave.get(w);
-      return mmRoundColumn(matches, mmRoundLabel(matches), 'mm-side-right');
+      return mmRoundColumn(matches, waveLabel(w, matches), 'mm-side-right');
     })
     .join('');
 
@@ -899,8 +949,13 @@ function onPick(side) {
 
   if (state.finished) {
     scheduleTransition(
-      { fromLabel, toLabel: 'Champion', remaining: 1 },
-      2400
+      {
+        fromLabel,
+        toLabel: 'Champion',
+        remaining: 1,
+        champion: state.champion,
+      },
+      4200
     );
     return;
   }

@@ -47,19 +47,23 @@ function noteBye(byeCounts, bye) {
   return next;
 }
 
-export function roundLabel(remainingCount) {
-  if (remainingCount === 2) return 'Final';
-  if (remainingCount === 4) return 'Semifinals';
-  if (remainingCount === 8) return 'Quarterfinals';
-  return `${remainingCount} remaining`;
+export function roundLabel(remainingCount, initialCount = null) {
+  const n = Math.max(0, Number(remainingCount) || 0);
+  if (n === 2) return 'Final';
+  if (n === 4) return 'Semifinals';
+  if (n === 8) return 'Quarterfinals';
+  if (n === 16) return 'Round of 16';
+  if (n === 32) return 'Round of 32';
+  if (n === 64) return 'Round of 64';
+  // Non-power-of-two fields: label by total songs still alive (whole tournament)
+  if (initialCount != null && n === initialCount) {
+    return `${initialCount} songs`;
+  }
+  return `${n} songs left`;
 }
 
-export function regionRoundLabel(songCount) {
-  if (songCount <= 1) return 'Waiting';
-  if (songCount === 2) return 'Semifinal';
-  if (songCount === 4) return 'Quarterfinal';
-  if (songCount === 8) return 'Round of 8';
-  return `${songCount} remaining`;
+export function regionRoundLabel(songCount, initialCount = null) {
+  return roundLabel(songCount, initialCount);
 }
 
 export function splitRegions(songs) {
@@ -228,7 +232,7 @@ export function createTournament(playlist, tracks, seeding) {
     matches: flattenMatches(left, right, finalMatch, crossMatch),
     matchIndex: 0,
     roundNumber: 1,
-    remaining: totalRemaining(left, right, finalMatch),
+    remaining: ordered.length,
     bye: left.bye || right.bye,
     winners: [],
     champion: null,
@@ -319,7 +323,7 @@ function advanceRegions(state) {
       matches: [finalMatch],
       matchIndex: 0,
       roundNumber: state.roundNumber + 1,
-      remaining: 2,
+      remaining: Math.max(2, state.initialCount - state.history.length),
       bye: null,
       winners: [],
     };
@@ -385,7 +389,7 @@ function advanceRegions(state) {
       matches: [finalMatch],
       matchIndex: 0,
       roundNumber: state.roundNumber + 1,
-      remaining: 2,
+      remaining: Math.max(2, state.initialCount - state.history.length),
       bye: null,
       winners: [],
     };
@@ -402,7 +406,7 @@ function advanceRegions(state) {
     matches: flattenMatches(left, right, null, resolved.crossMatch),
     matchIndex: 0,
     roundNumber: state.roundNumber + 1,
-    remaining: totalRemaining(left, right, null),
+    remaining: Math.max(2, state.initialCount - state.history.length),
     bye: left.bye || right.bye,
     winners: [],
   };
@@ -428,24 +432,28 @@ export function pickWinner(state, side) {
     crossWinner = winner;
   }
 
+  const history = [
+    ...state.history,
+    {
+      round: state.roundNumber,
+      matchIndex: state.matchIndex,
+      region,
+      a: match.a,
+      b: match.b,
+      winnerId: winner.id,
+      loserId: loser.id,
+    },
+  ];
+
   const next = {
     ...state,
     left,
     right,
     crossWinner,
-    history: [
-      ...state.history,
-      {
-        round: state.roundNumber,
-        matchIndex: state.matchIndex,
-        region,
-        a: match.a,
-        b: match.b,
-        winnerId: winner.id,
-        loserId: loser.id,
-      },
-    ],
+    history,
     matchIndex: state.matchIndex + 1,
+    // Whole tournament songs still alive (each match eliminates one)
+    remaining: Math.max(1, state.initialCount - history.length),
   };
 
   if (region === 'final') {
@@ -485,13 +493,12 @@ export function progress(state) {
   const match = currentMatch(state);
   const region = match?.region;
 
-  let label = roundLabel(state.remaining);
-  if (region === 'final') {
+  // Always label from total songs left in the whole tournament (not one half)
+  let label = 'Final';
+  if (region === 'final' || state.remaining === 2) {
     label = 'Final';
-  } else if (region === 'left') {
-    label = regionRoundLabel(state.left.songs?.length || 0);
-  } else if (region === 'right') {
-    label = regionRoundLabel(state.right.songs?.length || 0);
+  } else {
+    label = roundLabel(state.remaining, state.initialCount);
   }
 
   return {
