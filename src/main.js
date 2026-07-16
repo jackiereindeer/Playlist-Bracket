@@ -209,6 +209,7 @@ function render() {
   disposeMedia();
   renderGeneration += 1;
   const gen = renderGeneration;
+  document.body.classList.remove('on-setup');
 
   if (loading) {
     clearStageVibe();
@@ -242,115 +243,71 @@ function render() {
 }
 
 function renderSetup() {
+  document.body.classList.add('on-setup');
   app.innerHTML = `
     <div class="setup-page">
+      <div class="setup-bg" aria-hidden="true">
+        <span class="blob blob-a"></span>
+        <span class="blob blob-b"></span>
+        <span class="blob blob-c"></span>
+        <span class="blob blob-d"></span>
+        <span class="swirl swirl-a"></span>
+        <span class="swirl swirl-b"></span>
+        <span class="swirl swirl-c"></span>
+        <span class="shape shape-ring"></span>
+        <span class="shape shape-dot-a"></span>
+        <span class="shape shape-dot-b"></span>
+        <span class="shape shape-dot-c"></span>
+        <span class="shape shape-bar"></span>
+        <span class="shape shape-arc"></span>
+      </div>
+
       ${brandHeaderHtml()}
 
-      <div class="setup-layout">
-        <section class="setup-panel card">
-          <p class="setup-kicker">Single elimination</p>
-          <h2 class="setup-title">Crown one song from any public playlist.</h2>
-          <p class="setup-lead">
-            Paste a link, run 1v1 matchups, and keep picking until only one track is left standing.
-          </p>
+      <div class="card setup-card">
+        <form class="setup-form" id="setup-form">
+          <div class="field">
+            <label for="playlist-url">Spotify playlist link</label>
+            <input
+              id="playlist-url"
+              name="url"
+              type="url"
+              placeholder="https://open.spotify.com/playlist/…"
+              required
+              autocomplete="off"
+            />
+          </div>
 
-          <form class="setup-form" id="setup-form">
-            <div class="field">
-              <label for="playlist-url">Spotify playlist link</label>
-              <input
-                id="playlist-url"
-                name="url"
-                type="url"
-                placeholder="https://open.spotify.com/playlist/…"
-                required
-                autocomplete="off"
-              />
-            </div>
-
-            <div class="field">
-              <label>Matchup order</label>
-              <div class="seed-options">
-                <div class="seed-option">
-                  <input type="radio" name="seeding" id="seed-order" value="order" checked />
-                  <label for="seed-order">
-                    Playlist order
-                    <span>1st vs 2nd, 3rd vs 4th…</span>
-                  </label>
-                </div>
-                <div class="seed-option">
-                  <input type="radio" name="seeding" id="seed-shuffle" value="shuffle" />
-                  <label for="seed-shuffle">
-                    Shuffle
-                    <span>Random matchups</span>
-                  </label>
-                </div>
+          <div class="field">
+            <label>Matchup order</label>
+            <div class="seed-options">
+              <div class="seed-option">
+                <input type="radio" name="seeding" id="seed-order" value="order" checked />
+                <label for="seed-order">
+                  Playlist order
+                  <span>1st vs 2nd, 3rd vs 4th…</span>
+                </label>
               </div>
-            </div>
-
-            ${
-              error
-                ? `<div class="error-box" role="alert">${escapeHtml(error)}</div>`
-                : `<p class="setup-note">Playlist must be public.</p>`
-            }
-
-            <div class="form-actions">
-              <button type="submit" id="start-btn">Start tournament</button>
-            </div>
-          </form>
-        </section>
-
-        <aside class="setup-aside" aria-hidden="true">
-          <div class="setup-visual">
-            <div class="bracket-sketch">
-              <div class="sketch-col">
-                <span class="sketch-node"></span>
-                <span class="sketch-node"></span>
-                <span class="sketch-node"></span>
-                <span class="sketch-node"></span>
-              </div>
-              <div class="sketch-col sketch-mid">
-                <span class="sketch-node"></span>
-                <span class="sketch-node"></span>
-              </div>
-              <div class="sketch-col sketch-final">
-                <span class="sketch-node sketch-champ"></span>
-              </div>
-              <div class="sketch-col sketch-mid">
-                <span class="sketch-node"></span>
-                <span class="sketch-node"></span>
-              </div>
-              <div class="sketch-col">
-                <span class="sketch-node"></span>
-                <span class="sketch-node"></span>
-                <span class="sketch-node"></span>
-                <span class="sketch-node"></span>
-              </div>
-            </div>
-            <div class="setup-steps">
-              <div class="setup-step">
-                <span class="setup-step-num">01</span>
-                <div>
-                  <strong>Load a playlist</strong>
-                  <p>Any public Spotify playlist link works.</p>
-                </div>
-              </div>
-              <div class="setup-step">
-                <span class="setup-step-num">02</span>
-                <div>
-                  <strong>Pick winners</strong>
-                  <p>One match at a time, with volume under your control.</p>
-                </div>
-              </div>
-              <div class="setup-step">
-                <span class="setup-step-num">03</span>
-                <div>
-                  <strong>See the full bracket</strong>
-                  <p>Finish with a champion and a shareable result.</p>
-                </div>
+              <div class="seed-option">
+                <input type="radio" name="seeding" id="seed-shuffle" value="shuffle" />
+                <label for="seed-shuffle">
+                  Shuffle
+                  <span>Random matchups</span>
+                </label>
               </div>
             </div>
           </div>
-        </aside>
+
+          ${
+            error
+              ? `<div class="error-box" role="alert">${escapeHtml(error)}</div>`
+              : `<p class="setup-note">Playlist must be public.</p>`
+          }
+
+          <div class="form-actions">
+            <button type="submit" id="start-btn">Start tournament</button>
+          </div>
+        </form>
       </div>
     </div>
   `;
