@@ -2707,6 +2707,23 @@ body[data-stage='quarters'] .vs-badge {
   color: transparent;
 }
 
+.rating-big.is-empty {
+  background: none;
+  -webkit-background-clip: unset;
+  background-clip: unset;
+  color: var(--muted);
+  opacity: 0.65;
+}
+
+.rating-fine.is-disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+#gr-lock:disabled {
+  opacity: 0.65;
+}
+
 .rating-num-row {
   display: flex;
   flex-wrap: wrap;
@@ -2978,6 +2995,22 @@ body[data-stage='quarters'] .vs-badge {
   box-shadow: 0 0 0 1px var(--accent, #a78bfa);
 }
 
+.party-code-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.party-code-row .party-code-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.party-code-row #pcode-paste {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .party-code-input {
   font-family: ui-monospace, monospace;
   letter-spacing: 0.2em;
@@ -3161,6 +3194,110 @@ body[data-stage='quarters'] .vs-badge {
   z-index: 0;
   bottom: 0;
   right: 0;
+}
+
+/* Group Rate (party) */
+.party-group-rate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.55rem;
+  padding: 1.1rem 1rem 1.25rem;
+}
+
+.party-group-rate .rating-cover {
+  width: min(240px, 70vw);
+}
+
+.party-group-rate-results .rating-results-header {
+  margin-bottom: 0.5rem;
+}
+
+.gr-tabs {
+  display: flex;
+  gap: 0.4rem;
+  justify-content: center;
+  margin-bottom: 0.75rem;
+}
+
+.gr-tabs .is-on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.gr-results-grid {
+  margin-bottom: 0.75rem;
+}
+
+.gr-expand {
+  margin-top: 0.25rem;
+  text-align: left;
+}
+
+.gr-expand summary {
+  cursor: pointer;
+}
+
+.gr-score-list,
+.gr-mini-table {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.35rem;
+}
+
+.gr-mini-table {
+  /* always-visible mini chips under card (14b) */
+}
+
+.gr-score-chip {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--chip, var(--accent)) 22%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--chip, var(--accent)) 40%, var(--border));
+}
+
+.gr-matrix-wrap {
+  overflow: auto;
+  max-height: min(55vh, 480px);
+  margin-bottom: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.gr-matrix {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.gr-matrix th,
+.gr-matrix td {
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.gr-matrix th:first-child,
+.gr-matrix td:first-child,
+.gr-matrix tbody th {
+  text-align: left;
+  position: sticky;
+  left: 0;
+  background: var(--surface);
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gr-matrix thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 1;
 }
 
 .roster-row.is-readonly {

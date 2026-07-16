@@ -17,7 +17,9 @@ import {
   HOST_BACKUP_SECONDS,
   MAX_NAME_LEN,
   MAX_PLAYERS,
+  MAX_PLAYERS_GROUP_RATE,
   PHASE,
+  GAME_MODE,
   IDLE_MS,
 } from './constants.js';
 
@@ -93,13 +95,33 @@ export class Room {
     this.paused = false;
     this.locked = false; // true after Start until champion lobby
     this.settings = {
+      /** bracket = 1v1 tournament · group_rate = rate songs together */
+      gameMode: GAME_MODE.BRACKET,
       seeding: 'order', // order | shuffle
-      playMode: 'desync', // desync | sync
+      playMode: 'desync', // desync | sync (bracket); group rate is always desync
       voteSeconds: DEFAULT_VOTE_SECONDS,
       backupSeconds: HOST_BACKUP_SECONDS,
       /** If true, any connected player can add songs by link (host still curates). */
       allowPartyAddSongs: false,
     };
+    // ── Group Rate session (null / cleared in lobby) ──
+    /** @type {object[]|null} locked track list */
+    this.rateTracks = null;
+    this.rateIndex = 0;
+    /** @type {Set<string>} rater player ids (snapshot at start; DC removes) */
+    this.rateRaterIds = new Set();
+    /**
+     * Current song lock-ins: playerId → { score, displayName, color, avatar, pfp }
+     * Kept if they DC after locking so their score still ranks.
+     */
+    this.rateSongScores = new Map();
+    /**
+     * Finished songs: { song, scores: { [playerId]: { displayName, color, avatar, pfp, score } } }
+     * @type {object[]}
+     */
+    this.rateArchive = [];
+    /** @type {Set<string>} players who pressed Continue on results */
+    this.rateReadyNext = new Set();
     /** @type {Map<string, object>} */
     this.players = new Map();
     /** @type {Set<string>} session tokens banned from this room */
@@ -265,6 +287,7 @@ export class Room {
       playlistUrl: this.playlistUrl || '',
       roster: this.publicRoster(),
       error: this.error || '',
+      groupRate: this.publicGroupRate(forPlayerId),
       match: match
         ? {
             a: slimSong(match.a),
@@ -394,19 +417,25 @@ export class Room {
       }
     }
 
-    // New players only in open lobby. Champion results = wait for host "New lobby".
-    // (Existing seats still rejoin above via session token.)
+    // New players only in open lobby. Mid Group Rate: no new raters (design).
+    // (Existing seats still rejoin above via session token — only if still connected slot free.)
     if (this.phase !== PHASE.LOBBY) {
       const err = new Error(
-        this.phase === PHASE.CHAMPION
-          ? 'Tournament finished — wait for the host to open a new lobby.'
-          : 'Game already started — wait for the next lobby after this tournament.'
+        this.phase === PHASE.CHAMPION || this.phase === PHASE.RATE_RESULTS
+          ? 'Session finished — wait for everyone to continue to a new lobby.'
+          : this.phase === PHASE.RATE_SONG
+            ? 'Group Rate already started — no late join. Wait for the next lobby.'
+            : 'Game already started — wait for the next lobby after this tournament.'
       );
       err.code = 'LOCKED';
       throw err;
     }
 
-    if (this.players.size >= MAX_PLAYERS) {
+    const maxPlayers =
+      this.settings.gameMode === GAME_MODE.GROUP_RATE
+        ? MAX_PLAYERS_GROUP_RATE
+        : MAX_PLAYERS;
+    if (this.players.size >= maxPlayers) {
       const err = new Error('Room is full.');
       err.code = 'FULL';
       throw err;
@@ -443,11 +472,356 @@ export class Room {
       this.transferHost();
     }
 
+    // Group Rate: DC = out for the rest of this run (unlucky). Drop seat so no rejoin mid-game.
+    // Keep a lock-in already submitted for the current song (name snapshotted at lock).
+    if (this.phase === PHASE.RATE_SONG || this.phase === PHASE.RATE_RESULTS) {
+      this.rateRaterIds.delete(playerId);
+      this.rateReadyNext.delete(playerId);
+      this.players.delete(playerId);
+      if (this.phase === PHASE.RATE_SONG) this.maybeAdvanceGroupRate();
+      else this.maybeFinishResultsReady();
+      this.broadcast();
+      return;
+    }
+
     // If mid-vote, re-check whether all remaining connected have voted
     if (this.phase === PHASE.MATCH && !this.paused) {
       this.maybeFinishVoting();
     }
     this.broadcast();
+  }
+
+  clampRateScore(n) {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return null;
+    return Math.min(10, Math.max(0, Math.round(x * 10) / 10));
+  }
+
+  clearGroupRateState() {
+    this.rateTracks = null;
+    this.rateIndex = 0;
+    this.rateRaterIds = new Set();
+    this.rateSongScores = new Map();
+    this.rateArchive = [];
+    this.rateReadyNext = new Set();
+  }
+
+  /**
+   * Host starts Group Rate: lock selected tracks, snapshot raters, first song.
+   */
+  startGroupRate(playerId) {
+    this.assertHost(playerId);
+    this.touch();
+    if (this.settings.gameMode !== GAME_MODE.GROUP_RATE) {
+      const err = new Error('Switch the room to Group Rate mode first.');
+      err.code = 'BAD_MODE';
+      throw err;
+    }
+    if (this.phase !== PHASE.LOBBY || this.locked) {
+      const err = new Error('Can only start Group Rate from the lobby.');
+      err.code = 'BAD_PHASE';
+      throw err;
+    }
+    let selected = this._rosterSelectedTracks();
+    if (selected.length < 1) {
+      const err = new Error('Select at least 1 song to rate.');
+      err.code = 'NO_PLAYLIST';
+      throw err;
+    }
+    if (this.settings.seeding === 'shuffle') {
+      // Fisher-Yates
+      selected = [...selected];
+      for (let i = selected.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [selected[i], selected[j]] = [selected[j], selected[i]];
+      }
+    }
+
+    const raters = this.connectedVoters();
+    if (raters.length < 1) {
+      const err = new Error('Need at least one connected player.');
+      err.code = 'NO_PLAYERS';
+      throw err;
+    }
+
+    this.clearVoteTimer();
+    this.tournament = null;
+    this.votes.clear();
+    this.reveal = null;
+    this.winnerBeat = null;
+    this.nowPlaying = null;
+    this.error = '';
+    this.locked = true;
+    this.paused = false;
+    this.rateTracks = selected.map((t) => slimSong(t)).filter(Boolean);
+    this.rateIndex = 0;
+    this.rateRaterIds = new Set(raters.map((p) => p.id));
+    this.rateSongScores = new Map();
+    this.rateArchive = [];
+    this.rateReadyNext = new Set();
+    this.phase = PHASE.RATE_SONG;
+    this.broadcast();
+  }
+
+  /** Submit or change rating for the current song (0–10, 0.1 steps). */
+  submitGroupRate(playerId, rawScore) {
+    this.touch();
+    if (this.phase !== PHASE.RATE_SONG) {
+      const err = new Error('Not rating a song right now.');
+      err.code = 'BAD_PHASE';
+      throw err;
+    }
+    if (!this.rateRaterIds.has(playerId)) {
+      const err = new Error('You are not a rater in this session.');
+      err.code = 'NOT_RATER';
+      throw err;
+    }
+    const p = this.players.get(playerId);
+    if (!p?.connected || p.banned) {
+      const err = new Error('You cannot rate right now.');
+      err.code = 'NO_RATE';
+      throw err;
+    }
+    const score = this.clampRateScore(rawScore);
+    if (score == null) {
+      const err = new Error('Invalid rating.');
+      err.code = 'BAD_SCORE';
+      throw err;
+    }
+    this.rateSongScores.set(playerId, {
+      score,
+      displayName: p.displayName,
+      color: p.color,
+      avatar: p.avatar,
+      pfp: p.pfp || null,
+    });
+    this.maybeAdvanceGroupRate();
+    this.broadcast();
+  }
+
+  /** Required raters still in the room for the current song. */
+  activeGroupRaters() {
+    return [...this.rateRaterIds].filter((id) => {
+      const p = this.players.get(id);
+      return p && p.connected && !p.banned;
+    });
+  }
+
+  rateScoreValue(entry) {
+    if (entry == null) return null;
+    if (typeof entry === 'number') return entry;
+    return entry.score;
+  }
+
+  maybeAdvanceGroupRate() {
+    if (this.phase !== PHASE.RATE_SONG || !this.rateTracks?.length) return;
+    const need = this.activeGroupRaters();
+    if (need.length < 1) {
+      // Everyone left — finish current song if any scores, then results or lobby
+      if (this.rateSongScores.size > 0 || this.rateArchive.length > 0) {
+        if (this.rateIndex < this.rateTracks.length) {
+          this.finalizeCurrentRateSong();
+        }
+        // Flush remaining unrated songs? No — only songs that were completed.
+        this.phase = PHASE.RATE_RESULTS;
+        this.rateReadyNext = new Set();
+      } else {
+        this.returnToLobbyAfterGroupRate();
+      }
+      return;
+    }
+    for (const id of need) {
+      if (!this.rateSongScores.has(id)) return;
+    }
+    this.finalizeCurrentRateSong();
+    if (this.rateIndex >= this.rateTracks.length) {
+      this.phase = PHASE.RATE_RESULTS;
+      this.rateReadyNext = new Set();
+    }
+    // else: next song — scores map already cleared in finalize
+  }
+
+  finalizeCurrentRateSong() {
+    const song = this.rateTracks?.[this.rateIndex];
+    if (!song) {
+      this.rateIndex = this.rateTracks?.length || 0;
+      return;
+    }
+    const scores = {};
+    for (const [pid, entry] of this.rateSongScores) {
+      const score = this.rateScoreValue(entry);
+      if (score == null) continue;
+      const p = this.players.get(pid);
+      const snap = typeof entry === 'object' && entry ? entry : null;
+      scores[pid] = {
+        playerId: pid,
+        displayName: p?.displayName || snap?.displayName || 'Player',
+        color: p?.color || snap?.color || 'slate',
+        avatar: p?.avatar || snap?.avatar || 'frog',
+        pfp: p?.pfp || snap?.pfp || null,
+        score,
+      };
+    }
+    // Only archive if at least one lock-in (empty song shouldn't rank)
+    if (Object.keys(scores).length > 0) {
+      this.rateArchive.push({ song: slimSong(song), scores });
+    }
+    this.rateSongScores = new Map();
+    this.rateIndex += 1;
+  }
+
+  buildGroupRateRanking() {
+    const nameById = new Map();
+    for (const p of this.players.values()) {
+      nameById.set(p.id, {
+        displayName: p.displayName,
+        color: p.color,
+        avatar: p.avatar,
+        pfp: p.pfp || null,
+      });
+    }
+    // Merge identities from archive (people who left after rating)
+    for (const row of this.rateArchive) {
+      for (const [pid, s] of Object.entries(row.scores || {})) {
+        if (!nameById.has(pid)) {
+          nameById.set(pid, {
+            displayName: s.displayName,
+            color: s.color,
+            avatar: s.avatar,
+            pfp: s.pfp || null,
+          });
+        }
+      }
+    }
+
+    return this.rateArchive.map((row, order) => {
+      const vals = Object.values(row.scores || {}).map((s) => s.score);
+      const avg =
+        vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+      const rounded = Math.round(avg * 10) / 10;
+      return {
+        song: slimSong(row.song),
+        average: rounded,
+        count: vals.length,
+        scores: Object.entries(row.scores || {}).map(([pid, s]) => ({
+          playerId: pid,
+          displayName: s.displayName,
+          color: s.color,
+          avatar: s.avatar,
+          pfp: s.pfp || null,
+          score: s.score,
+        })),
+        order,
+      };
+    }).sort((a, b) => {
+      if (b.average !== a.average) return b.average - a.average;
+      return a.order - b.order;
+    });
+  }
+
+  /** Everyone presses Continue on results → open lobby (same room). */
+  groupRateContinue(playerId) {
+    this.touch();
+    if (this.phase !== PHASE.RATE_RESULTS) {
+      const err = new Error('Not on the results screen.');
+      err.code = 'BAD_PHASE';
+      throw err;
+    }
+    const p = this.players.get(playerId);
+    if (!p?.connected) {
+      const err = new Error('Not connected.');
+      err.code = 'NO';
+      throw err;
+    }
+    this.rateReadyNext.add(playerId);
+    this.maybeFinishResultsReady();
+    this.broadcast();
+  }
+
+  maybeFinishResultsReady() {
+    if (this.phase !== PHASE.RATE_RESULTS) return;
+    const connected = [...this.players.values()].filter(
+      (p) => p.connected && !p.banned
+    );
+    if (connected.length < 1) {
+      this.returnToLobbyAfterGroupRate();
+      return;
+    }
+    for (const p of connected) {
+      if (!this.rateReadyNext.has(p.id)) return;
+    }
+    this.returnToLobbyAfterGroupRate();
+  }
+
+  returnToLobbyAfterGroupRate() {
+    this.phase = PHASE.LOBBY;
+    this.locked = false;
+    this.paused = false;
+    this.clearGroupRateState();
+    this.tournament = null;
+    this.votes.clear();
+    this.reveal = null;
+    this.winnerBeat = null;
+    this.nowPlaying = null;
+    this.error = '';
+    this.clearVoteTimer();
+    // Keep playlist/roster for another round
+    this.broadcast();
+  }
+
+  publicGroupRate(forPlayerId) {
+    if (
+      this.phase !== PHASE.RATE_SONG &&
+      this.phase !== PHASE.RATE_RESULTS
+    ) {
+      return null;
+    }
+    const me = forPlayerId ? this.players.get(forPlayerId) : null;
+    const active = this.activeGroupRaters();
+    const rated = active.filter((id) => this.rateSongScores.has(id)).length;
+    const iAmRater = Boolean(forPlayerId && this.rateRaterIds.has(forPlayerId));
+    const myEntry =
+      forPlayerId && this.rateSongScores.has(forPlayerId)
+        ? this.rateSongScores.get(forPlayerId)
+        : null;
+    const myRating = this.rateScoreValue(myEntry);
+
+    if (this.phase === PHASE.RATE_SONG) {
+      const song = this.rateTracks?.[this.rateIndex] || null;
+      return {
+        index: this.rateIndex,
+        total: this.rateTracks?.length || 0,
+        song: slimSong(song),
+        ratedCount: rated,
+        raterCount: active.length,
+        // Privacy: only X/Y — no who, no scores
+        myRating,
+        iAmRater,
+        canRate: iAmRater && Boolean(me?.connected),
+      };
+    }
+
+    // Results
+    const ranking = this.buildGroupRateRanking();
+    const connected = [...this.players.values()].filter(
+      (p) => p.connected && !p.banned
+    );
+    const ready = connected.filter((p) => this.rateReadyNext.has(p.id)).length;
+    return {
+      index: this.rateTracks?.length || 0,
+      total: this.rateTracks?.length || 0,
+      song: null,
+      ratedCount: 0,
+      raterCount: 0,
+      myRating: null,
+      iAmRater,
+      canRate: false,
+      ranking,
+      playlistName: this.playlistMeta?.name || 'Group Rate',
+      readyCount: ready,
+      readyTotal: connected.length,
+      myReady: Boolean(forPlayerId && this.rateReadyNext.has(forPlayerId)),
+    };
   }
 
   transferHost() {
@@ -477,6 +851,11 @@ export class Room {
       const err = new Error('Cannot change settings mid-tournament.');
       err.code = 'LOCKED';
       throw err;
+    }
+    if (partial.gameMode === GAME_MODE.BRACKET || partial.gameMode === GAME_MODE.GROUP_RATE) {
+      if (this.phase === PHASE.LOBBY && !this.locked) {
+        this.settings.gameMode = partial.gameMode;
+      }
     }
     if (partial.seeding === 'order' || partial.seeding === 'shuffle') {
       this.settings.seeding = partial.seeding;
@@ -766,6 +1145,9 @@ export class Room {
   startTournament(playerId) {
     this.assertHost(playerId);
     this.touch();
+    if (this.settings.gameMode === GAME_MODE.GROUP_RATE) {
+      return this.startGroupRate(playerId);
+    }
     const selected = this._rosterSelectedTracks();
     if (selected.length < 2) {
       const err = new Error(
@@ -1150,8 +1532,8 @@ export class Room {
   newLobby(playerId) {
     this.assertHost(playerId);
     this.touch();
-    if (this.phase !== PHASE.CHAMPION) {
-      const err = new Error('Only available after a tournament ends.');
+    if (this.phase !== PHASE.CHAMPION && this.phase !== PHASE.RATE_RESULTS) {
+      const err = new Error('Only available after a tournament or Group Rate ends.');
       err.code = 'BAD_PHASE';
       throw err;
     }
@@ -1166,6 +1548,7 @@ export class Room {
     this.noPreviewSide = null;
     this.abstentions = [];
     this.error = '';
+    this.clearGroupRateState();
     // Keep last roster + meta so host can re-curate or load a new link
     this.clearVoteTimer();
     this.broadcast();
@@ -1386,6 +1769,7 @@ export class Room {
     this.winnerBeat = null;
     this.nowPlaying = null;
     this.abstentions = [];
+    this.clearGroupRateState();
     for (const p of this.players.values()) {
       try {
         p.ws = null;

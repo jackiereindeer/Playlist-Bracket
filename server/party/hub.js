@@ -205,6 +205,14 @@ async function handle(ws, ctx, msg, type, rooms, hub) {
     case 'start':
       room.startTournament(pid);
       break;
+    case 'group_rate_submit':
+    case 'rate_submit':
+      room.submitGroupRate(pid, msg.score ?? msg.rating ?? msg.value);
+      break;
+    case 'group_rate_continue':
+    case 'rate_continue':
+      room.groupRateContinue(pid);
+      break;
     case 'vote':
       room.castVote(pid, msg.side, { random: false });
       break;

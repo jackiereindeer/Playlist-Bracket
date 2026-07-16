@@ -33,12 +33,17 @@ March Madness–style **1v1 song tournament** from a **public** Spotify or YouTu
 - Win-beat full-screen after each pick (skippable checkbox for long lists).  
 - Undo / 1–2 keys / random; localStorage save.
 
-### Party (local only until explicit push)
+### Party / multiplayer
 
 - Home → **Play with friends** → host/join 6-char code.  
-- Kahoot-style votes, sync or desync play, timers, results with brackets.  
+- Kahoot-style **bracket** votes, timers, results; share `?room=`, PFPs, chat.  
 - Server: `server/party/*` WebSocket **`/party`**. Client: `src/party/*`.  
-- Party playlists: **Spotify-only** for now.
+- Spotify + YouTube mix allowed on roster.  
+- **Group Rate Mode** (design locked in AI-Context `playlist-bracket.md`): lobby mode Bracket vs Group Rate; song-by-song group ratings → averages + per-player breakdown. **Not built until braej says go; never push without explicit push.**
+
+### Solo Rating Mode
+
+- Home → Rating Mode → same roster load → rate 0–10 (0.1 fine) + volume → ranked end screen.
 
 **Never put the word “Blight” in product UI** (folder name only).
 

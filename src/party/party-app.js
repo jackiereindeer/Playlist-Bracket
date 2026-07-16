@@ -749,6 +749,8 @@ export function startPartyApp(root, opts) {
       }
       if (msg.type === 'joined' || msg.type === 'state') {
         const prevPhase = state?.phase;
+        const prevGrIndex = state?.groupRate?.index;
+        const prevGrSongId = state?.groupRate?.song?.id;
         state = msg.state;
         screen = 'live';
         gateError = '';
@@ -775,7 +777,42 @@ export function startPartyApp(root, opts) {
         ) {
           hardStopAudio();
           lastSyncedKey = null;
+        } else if (
+          prevPhase === 'rate_song' &&
+          (state?.phase === 'rate_results' || state?.phase === 'lobby')
+        ) {
+          hardStopAudio();
+          lastSyncedKey = null;
+        } else if (
+          prevPhase === 'rate_results' &&
+          state?.phase === 'lobby'
+        ) {
+          hardStopAudio();
+          lastSyncedKey = null;
+        } else if (
+          prevPhase === 'rate_song' &&
+          state?.phase === 'rate_song' &&
+          prevGrSongId &&
+          state.groupRate?.song?.id &&
+          prevGrSongId !== state.groupRate.song.id
+        ) {
+          // Advanced to next song — stop previous preview
+          hardStopAudio();
+          lastSyncedKey = null;
         }
+
+        // Soft-update Group Rate progress when still on the same song (keep audio + draft UI)
+        if (
+          prevPhase === 'rate_song' &&
+          state?.phase === 'rate_song' &&
+          prevGrIndex === state.groupRate?.index &&
+          prevGrSongId === state.groupRate?.song?.id &&
+          root.querySelector('.party-group-rate')
+        ) {
+          softUpdateGroupRateHud(state);
+          return;
+        }
+
         render();
         // After DOM exists, apply sync / auto playback
         if (state?.nowPlaying) {
@@ -1430,16 +1467,19 @@ export function startPartyApp(root, opts) {
             gateMode === 'join'
               ? `<div class="field">
                   <label for="pcode">Room code</label>
-                  <input id="pcode" maxlength="6" value="${esc(form.code)}" placeholder="6 characters" class="party-code-input" autocomplete="off" ${
-                    parseRoomFromUrl().length === 6 ? 'aria-describedby="room-link-hint"' : ''
-                  } />
+                  <div class="party-code-row">
+                    <input id="pcode" maxlength="6" value="${esc(form.code)}" placeholder="6 characters" class="party-code-input" autocomplete="off" ${
+                      parseRoomFromUrl().length === 6 ? 'aria-describedby="room-link-hint"' : ''
+                    } />
+                    <button type="button" class="ghost small-btn" id="pcode-paste" title="Clear and paste from clipboard">Paste code</button>
+                  </div>
                   ${
                     parseRoomFromUrl().length === 6
                       ? `<p class="setup-note" id="room-link-hint">Opened from a share link — code filled in.</p>`
                       : ''
                   }
                 </div>`
-              : `<p class="setup-note">You’ll get a 6-character code and a share link. Spotify playlists only in party for now.</p>`
+              : `<p class="setup-note">You’ll get a 6-character code and a share link. Mix Spotify &amp; YouTube; Bracket or Group Rate.</p>`
           }
 
           ${
@@ -1473,6 +1513,45 @@ export function startPartyApp(root, opts) {
     root.querySelector('#pcode')?.addEventListener('input', (e) => {
       form.code = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
       e.target.value = form.code;
+    });
+    root.querySelector('#pcode-paste')?.addEventListener('click', async () => {
+      const input = root.querySelector('#pcode');
+      // Always clear old code first
+      form.code = '';
+      if (input) input.value = '';
+      try {
+        let text = '';
+        if (navigator.clipboard?.readText) {
+          text = await navigator.clipboard.readText();
+        }
+        // Accept raw code or full share URL (?room= / ?code=)
+        let code = normalizeRoomCode(text);
+        if (code.length < 6 && text) {
+          try {
+            const u = new URL(String(text).trim());
+            code = normalizeRoomCode(
+              u.searchParams.get('room') || u.searchParams.get('code') || ''
+            );
+          } catch {
+          }
+        }
+        form.code = code.slice(0, 6);
+        if (input) {
+          input.value = form.code;
+          input.focus();
+          input.select?.();
+        }
+        if (form.code.length === 6) {
+          gateError = '';
+        } else {
+          gateError = 'Clipboard didn’t have a valid 6-character room code.';
+        }
+        render();
+      } catch {
+        gateError =
+          'Could not read clipboard. Allow paste permission or type the code.';
+        render();
+      }
     });
     root.querySelectorAll('input[name="pcolor"]').forEach((el) => {
       el.addEventListener('change', () => {
@@ -1589,6 +1668,10 @@ export function startPartyApp(root, opts) {
 
     if (s.phase === 'champion') {
       body = renderChampionResults(s, isHost);
+    } else if (s.phase === 'rate_song') {
+      body = renderGroupRateSong(s, isHost);
+    } else if (s.phase === 'rate_results') {
+      body = renderGroupRateResults(s, isHost);
     } else if (s.phase === 'lobby') {
       body = renderLobby(s, isHost);
     } else if (s.phase === 'match') {
@@ -1767,6 +1850,297 @@ export function startPartyApp(root, opts) {
     `;
   }
 
+  function clampRateScore(n) {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return 5;
+    return Math.min(10, Math.max(0, Math.round(x * 10) / 10));
+  }
+
+  function formatRateScore(n) {
+    const v = clampRateScore(n);
+    return Number.isInteger(v) ? String(v) : v.toFixed(1);
+  }
+
+  /**
+   * Local draft for Group Rate UI.
+   * null = no number picked yet (slider inactive until user hits 0–10).
+   * Server only gets a score on “Lock in”.
+   */
+  let groupRateDraft = null;
+  let groupRateDraftSongIndex = -1;
+  let groupRateResultsTab = 'cards'; // cards | matrix
+
+  /** Soft HUD refresh so lock-in broadcasts don’t wipe the player DOM. */
+  function softUpdateGroupRateHud(s) {
+    const gr = s.groupRate || {};
+    const rated = gr.ratedCount || 0;
+    const raters = gr.raterCount || 0;
+    const left = Math.max(0, raters - rated);
+    const label = root.querySelector('.party-group-rate .rating-progress-label');
+    if (label) {
+      const idx = (gr.index || 0) + 1;
+      const total = gr.total || 1;
+      label.innerHTML = `Song ${idx} / ${total} · <strong>${rated}/${raters}</strong> locked in`;
+    }
+    const note = root.querySelector('.party-group-rate .setup-note');
+    if (note) {
+      note.innerHTML =
+        left > 0
+          ? `<strong>${rated}/${raters}</strong> locked in · waiting for ${left} more`
+          : `<strong>${rated}/${raters}</strong> locked in`;
+    }
+    if (gr.myRating != null) {
+      groupRateDraft = clampRateScore(gr.myRating);
+      const big = root.querySelector('#gr-big');
+      if (big) {
+        big.textContent = formatRateScore(groupRateDraft);
+        big.classList.remove('is-empty');
+      }
+      const lockBtn = root.querySelector('#gr-lock');
+      if (lockBtn) {
+        lockBtn.disabled = true;
+        lockBtn.textContent = 'Locked in';
+      }
+      const slider = root.querySelector('#gr-slider');
+      if (slider) {
+        slider.disabled = false;
+        slider.value = String(groupRateDraft);
+      }
+      root.querySelector('#gr-minus')?.removeAttribute('disabled');
+      root.querySelector('#gr-plus')?.removeAttribute('disabled');
+      root.querySelector('.rating-fine')?.classList.remove('is-disabled');
+      root.querySelectorAll('[data-gr-btn]').forEach((btn) => {
+        const v = Number(btn.getAttribute('data-gr-btn'));
+        btn.classList.toggle(
+          'is-active',
+          Math.floor(groupRateDraft) === v
+        );
+      });
+    }
+  }
+
+  function renderGroupRateSong(s, isHost) {
+    const gr = s.groupRate || {};
+    const song = gr.song;
+    if (!song?.id) {
+      return `<div class="card"><p class="muted">Waiting for next song…</p></div>`;
+    }
+    const songIndex = gr.index || 0;
+    if (songIndex !== groupRateDraftSongIndex) {
+      groupRateDraftSongIndex = songIndex;
+      // Fresh song: no pre-selected number (unless already locked on server)
+      groupRateDraft =
+        gr.myRating != null ? clampRateScore(gr.myRating) : null;
+    }
+    const idx = songIndex + 1;
+    const total = gr.total || 1;
+    const rated = gr.ratedCount || 0;
+    const raters = gr.raterCount || 0;
+    const canRate = Boolean(gr.canRate);
+    // If server has a locked score and we haven't re-picked, show it
+    if (gr.myRating != null && groupRateDraft == null) {
+      groupRateDraft = clampRateScore(gr.myRating);
+    }
+    const hasPick = groupRateDraft != null && Number.isFinite(groupRateDraft);
+    const my = hasPick ? clampRateScore(groupRateDraft) : null;
+    const lockedIn = gr.myRating != null;
+    const dirty =
+      lockedIn && hasPick && clampRateScore(gr.myRating) !== my;
+
+    const art = song.image
+      ? `<img class="rating-art" src="${esc(song.image)}" alt="" />`
+      : `<div class="rating-art rating-art-fallback" aria-hidden="true">🎵</div>`;
+    const yt = song.source === 'youtube' || song.youtubeId;
+    const buttons = Array.from({ length: 11 }, (_, i) => {
+      const active = hasPick && Math.floor(my) === i ? ' is-active' : '';
+      return `<button type="button" class="rating-num-btn${active}" data-gr-btn="${i}" ${
+        canRate ? '' : 'disabled'
+      }>${i}</button>`;
+    }).join('');
+    const volPct = Math.round(localVolume * 100);
+    const progressPct = total ? Math.round(((idx - 1) / total) * 100) : 0;
+    const fineDisabled = !canRate || !hasPick;
+
+    return `
+      <div class="card party-group-rate">
+        <div class="rating-progress-bar" aria-hidden="true"><span style="width:${progressPct}%"></span></div>
+        <p class="rating-progress-label muted small">Song ${idx} / ${total} · <strong>${rated}/${raters}</strong> locked in</p>
+        <div class="rating-cover ${yt ? 'is-yt' : ''}">
+          ${art}
+          ${yt ? `<div id="yt-party-a" class="rating-yt-host"></div>` : ''}
+          <button type="button" class="rating-play" id="gr-play" title="Play / pause">
+            <span id="gr-play-icon">${playSide === 'a' || playSide === 'gr' ? '❚❚' : '▶'}</span>
+          </button>
+        </div>
+        <h2 class="rating-title">${esc(song.name || 'Unknown')}</h2>
+        <p class="rating-artists muted">${esc(song.artists || '')}</p>
+        <div class="rating-vol volume-control">
+          <span class="volume-icon" aria-hidden="true">🔊</span>
+          <input type="range" class="volume-slider" data-party-vol min="0" max="100" step="1" value="${volPct}" aria-label="Volume" />
+          <span class="volume-pct" data-party-vol-label>${volPct}%</span>
+        </div>
+        ${
+          canRate
+            ? `
+          <div class="rating-score-block">
+            <p class="rating-big${hasPick ? '' : ' is-empty'}" id="gr-big">${
+              hasPick ? formatRateScore(my) : '—'
+            }</p>
+          </div>
+          <div class="rating-num-row" role="group" aria-label="Rating 0 to 10">${buttons}</div>
+          <div class="rating-fine${hasPick ? '' : ' is-disabled'}">
+            <button type="button" class="ghost small-btn" id="gr-minus" ${
+              fineDisabled ? 'disabled' : ''
+            }>−0.1</button>
+            <input type="range" id="gr-slider" min="0" max="10" step="0.1" value="${
+              hasPick ? my : 0
+            }" aria-label="Fine rating" ${fineDisabled ? 'disabled' : ''} />
+            <button type="button" class="ghost small-btn" id="gr-plus" ${
+              fineDisabled ? 'disabled' : ''
+            }>+0.1</button>
+          </div>
+          <div class="form-actions rating-actions">
+            <button type="button" id="gr-lock" ${
+              !hasPick || (lockedIn && !dirty) ? 'disabled' : ''
+            }>
+              ${
+                lockedIn && !dirty
+                  ? 'Locked in'
+                  : lockedIn && dirty
+                    ? 'Lock in new rating'
+                    : 'Lock in rating'
+              }
+            </button>
+          </div>
+          <p class="setup-note muted small"><strong>${rated}/${raters}</strong> locked in${
+              raters - rated > 0
+                ? ` · waiting for ${raters - rated} more`
+                : ''
+            }</p>
+        `
+            : `<p class="muted">You’re not rating this session (left or joined late). Spectating — ${rated}/${raters} locked in.</p>`
+        }
+      </div>
+    `;
+  }
+
+  function renderGroupRateResults(s, isHost) {
+    const gr = s.groupRate || {};
+    const ranking = gr.ranking || [];
+    const ready = gr.readyCount || 0;
+    const readyTotal = gr.readyTotal || 0;
+    const myReady = Boolean(gr.myReady);
+    const tab = groupRateResultsTab;
+
+    const cards = ranking
+      .map((row, rank) => {
+        const song = row.song || {};
+        const art = song.image
+          ? `<img src="${esc(song.image)}" alt="" loading="lazy" />`
+          : `<div class="rating-result-fallback">🎵</div>`;
+        const scores = (row.scores || [])
+          .slice()
+          .sort((a, b) => b.score - a.score)
+          .map(
+            (sc) =>
+              `<span class="gr-score-chip" style="--chip:${esc(
+                colorHex(sc.color, colors)
+              )}">${esc(sc.displayName)} <strong>${formatRateScore(
+                sc.score
+              )}</strong></span>`
+          )
+          .join('');
+        return `
+          <article class="rating-result-card gr-result-card">
+            <div class="rating-result-art">
+              ${art}
+              <span class="rating-result-badge">${formatRateScore(row.average)}</span>
+              <span class="rating-result-rank">#${rank + 1}</span>
+            </div>
+            <div class="rating-result-meta">
+              <strong class="rating-result-name">${esc(song.name || '')}</strong>
+              <span class="rating-result-artists muted small">${esc(song.artists || '')}</span>
+              <details class="gr-expand">
+                <summary class="muted small">Everyone’s scores (${row.count || 0})</summary>
+                <div class="gr-score-list">${scores || '<span class="muted small">—</span>'}</div>
+              </details>
+              <div class="gr-mini-table" aria-hidden="false">${scores}</div>
+            </div>
+          </article>
+        `;
+      })
+      .join('');
+
+    // Matrix: players × songs
+    const playerCols = new Map();
+    for (const row of ranking) {
+      for (const sc of row.scores || []) {
+        if (!playerCols.has(sc.playerId)) {
+          playerCols.set(sc.playerId, {
+            id: sc.playerId,
+            displayName: sc.displayName,
+          });
+        }
+      }
+    }
+    const players = [...playerCols.values()];
+    const matrixHead = players
+      .map((p) => `<th>${esc(p.displayName)}</th>`)
+      .join('');
+    const matrixBody = ranking
+      .map((row) => {
+        const byId = new Map((row.scores || []).map((sc) => [sc.playerId, sc.score]));
+        const cells = players
+          .map((p) => {
+            const v = byId.get(p.id);
+            return `<td>${v == null ? '—' : formatRateScore(v)}</td>`;
+          })
+          .join('');
+        return `<tr><th scope="row">${esc(row.song?.name || '')}</th><td><strong>${formatRateScore(
+          row.average
+        )}</strong></td>${cells}</tr>`;
+      })
+      .join('');
+
+    return `
+      <div class="card party-group-rate-results">
+        <header class="rating-results-header">
+          <h2>${esc(gr.playlistName || s.playlist?.name || 'Group Rate')}</h2>
+          <p class="muted small">${ranking.length} songs · sorted by average (high → low)</p>
+        </header>
+        <div class="gr-tabs">
+          <button type="button" class="ghost small-btn${
+            tab === 'cards' ? ' is-on' : ''
+          }" data-gr-tab="cards">Cards</button>
+          <button type="button" class="ghost small-btn${
+            tab === 'matrix' ? ' is-on' : ''
+          }" data-gr-tab="matrix">Full table</button>
+        </div>
+        ${
+          tab === 'matrix'
+            ? `<div class="gr-matrix-wrap"><table class="gr-matrix">
+                <thead><tr><th>Song</th><th>Avg</th>${matrixHead}</tr></thead>
+                <tbody>${matrixBody || '<tr><td colspan="99">No data</td></tr>'}</tbody>
+              </table></div>`
+            : `<div class="rating-results-grid gr-results-grid">${
+                cards || '<p class="muted">No ratings.</p>'
+              }</div>`
+        }
+        <div class="form-actions rating-results-actions">
+          <button type="button" id="gr-continue" ${myReady ? 'disabled' : ''}>
+            ${myReady ? `Waiting for others… (${ready}/${readyTotal})` : `Continue (${ready}/${readyTotal})`}
+          </button>
+        </div>
+        <p class="setup-note">Everyone must press Continue to return to the lobby (same room).</p>
+        ${
+          isHost
+            ? `<button type="button" class="ghost small-btn" id="p-new-lobby">Force new lobby (host)</button>`
+            : ''
+        }
+      </div>
+    `;
+  }
+
   function renderLobby(s, isHost) {
     const pl = s.playlist;
     const roster = s.roster;
@@ -1775,6 +2149,12 @@ export function startPartyApp(root, opts) {
     const allowPartyAdd = Boolean(s.settings?.allowPartyAddSongs);
     const canAddSongs = isHost || allowPartyAdd;
     const hasRoster = Boolean(roster?.tracks?.length);
+    const gameMode = s.settings?.gameMode === 'group_rate' ? 'group_rate' : 'bracket';
+    const isGroupRate = gameMode === 'group_rate';
+    const minStart = isGroupRate ? 1 : 2;
+    const startLabel = isGroupRate
+      ? `Start Group Rate (${selected})`
+      : `Start tournament (${selected})`;
 
     const rosterRows = hasRoster
       ? roster.tracks
@@ -1821,18 +2201,28 @@ export function startPartyApp(root, opts) {
             ? `
           <div class="party-settings">
             <h3 class="small">Host settings</h3>
-            <label class="party-setting-row">Matchup
+            <label class="party-setting-row">Game mode
+              <select id="p-gamemode">
+                <option value="bracket" ${!isGroupRate ? 'selected' : ''}>Bracket (1v1 votes)</option>
+                <option value="group_rate" ${isGroupRate ? 'selected' : ''}>Group Rate (rate together)</option>
+              </select>
+            </label>
+            <label class="party-setting-row">${isGroupRate ? 'Listen order' : 'Matchup'}
               <select id="p-seed">
                 <option value="order" ${s.settings?.seeding === 'order' ? 'selected' : ''}>Playlist order</option>
                 <option value="shuffle" ${s.settings?.seeding === 'shuffle' ? 'selected' : ''}>Shuffle</option>
               </select>
             </label>
-            <label class="party-setting-row">Play mode
+            ${
+              isGroupRate
+                ? `<p class="setup-note">Group Rate: everyone rates each song 0–10. Auto-next when all have rated. Full songs if YouTube; Spotify previews.</p>`
+                : `<label class="party-setting-row">Play mode
               <select id="p-playmode">
                 <option value="desync" ${s.settings?.playMode === 'desync' ? 'selected' : ''}>Desync (each device)</option>
                 <option value="sync" ${s.settings?.playMode === 'sync' ? 'selected' : ''}>Sync (host plays for everyone)</option>
               </select>
-            </label>
+            </label>`
+            }
             <label class="party-setting-check">
               <input type="checkbox" id="p-allow-add" ${allowPartyAdd ? 'checked' : ''} />
               <span>Allow party adding songs</span>
@@ -1848,12 +2238,14 @@ export function startPartyApp(root, opts) {
           <div class="form-actions">
             <button type="button" id="p-load">Load songs</button>
             <button type="button" id="p-start" ${
-              selected >= 2 ? '' : 'disabled'
-            }>Start tournament (${selected})</button>
+              selected >= minStart ? '' : 'disabled'
+            }>${esc(startLabel)}</button>
           </div>
         `
             : hasRoster
-              ? `<p class="muted small">Host is curating the bracket. ${
+              ? `<p class="muted small">Host is curating the ${
+                  isGroupRate ? 'rating list' : 'bracket'
+                }. ${
                   allowPartyAdd
                     ? 'You can add single songs below (playlists are host-only).'
                     : 'Only the host can add or remove songs.'
@@ -1873,7 +2265,9 @@ export function startPartyApp(root, opts) {
             <div>
               <strong>${esc(pl?.name || 'Party mix')}</strong>
               <p class="small muted">
-                <strong>${selected}</strong> of ${total} in the bracket
+                <strong>${selected}</strong> of ${total} ${
+                  isGroupRate ? 'to rate' : 'in the bracket'
+                }
                 ${
                   allowPartyAdd
                     ? ' · party can add songs'
@@ -1881,6 +2275,7 @@ export function startPartyApp(root, opts) {
                       ? ' · only host adds songs'
                       : ''
                 }
+                ${isGroupRate ? ' · Group Rate' : ''}
               </p>
             </div>
           </div>
@@ -2179,6 +2574,9 @@ export function startPartyApp(root, opts) {
           }
         } catch {
         }
+        root.querySelector('#p-gamemode')?.addEventListener('change', (e) => {
+          send('settings', { settings: { gameMode: e.target.value } });
+        });
         root.querySelector('#p-seed')?.addEventListener('change', (e) => {
           send('settings', { settings: { seeding: e.target.value } });
         });
@@ -2265,6 +2663,128 @@ export function startPartyApp(root, opts) {
         }
       });
     });
+
+    if (s.phase === 'rate_song') {
+      const gr = s.groupRate || {};
+      const song = gr.song;
+      const canRate = Boolean(gr.canRate);
+      const serverScore =
+        gr.myRating != null ? clampRateScore(gr.myRating) : null;
+
+      const refreshDraftUi = () => {
+        const hasPick =
+          groupRateDraft != null && Number.isFinite(groupRateDraft);
+        const my = hasPick ? clampRateScore(groupRateDraft) : null;
+        const big = root.querySelector('#gr-big');
+        if (big) {
+          big.textContent = hasPick ? formatRateScore(my) : '—';
+          big.classList.toggle('is-empty', !hasPick);
+        }
+        const slider = root.querySelector('#gr-slider');
+        const minus = root.querySelector('#gr-minus');
+        const plus = root.querySelector('#gr-plus');
+        const fine = root.querySelector('.rating-fine');
+        if (slider) {
+          slider.disabled = !canRate || !hasPick;
+          if (hasPick) slider.value = String(my);
+        }
+        if (minus) minus.disabled = !canRate || !hasPick;
+        if (plus) plus.disabled = !canRate || !hasPick;
+        fine?.classList.toggle('is-disabled', !hasPick);
+        root.querySelectorAll('[data-gr-btn]').forEach((btn) => {
+          const v = Number(btn.getAttribute('data-gr-btn'));
+          btn.classList.toggle(
+            'is-active',
+            hasPick && Math.floor(my) === v
+          );
+        });
+        const lockBtn = root.querySelector('#gr-lock');
+        const dirty =
+          serverScore != null &&
+          hasPick &&
+          serverScore !== my;
+        const lockedClean = serverScore != null && hasPick && !dirty;
+        if (lockBtn) {
+          lockBtn.disabled = !canRate || !hasPick || lockedClean;
+          lockBtn.textContent = lockedClean
+            ? 'Locked in'
+            : serverScore != null && dirty
+              ? 'Lock in new rating'
+              : 'Lock in rating';
+        }
+      };
+
+      /** Local pick only — does not send until Lock in. */
+      const setDraftLocal = (val) => {
+        groupRateDraft = clampRateScore(val);
+        refreshDraftUi();
+      };
+
+      root.querySelectorAll('[data-gr-btn]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          if (!canRate) return;
+          const whole = Number(btn.getAttribute('data-gr-btn'));
+          // First click sets the integer; re-click same int keeps decimal if any
+          const cur = groupRateDraft;
+          const next =
+            cur != null &&
+            Math.floor(cur) === whole &&
+            cur % 1 !== 0
+              ? cur
+              : whole;
+          setDraftLocal(next);
+        });
+      });
+      root.querySelector('#gr-slider')?.addEventListener('input', (e) => {
+        if (groupRateDraft == null) return;
+        setDraftLocal(Number(e.target.value));
+      });
+      root.querySelector('#gr-minus')?.addEventListener('click', () => {
+        if (groupRateDraft == null) return;
+        setDraftLocal(groupRateDraft - 0.1);
+      });
+      root.querySelector('#gr-plus')?.addEventListener('click', () => {
+        if (groupRateDraft == null) return;
+        setDraftLocal(groupRateDraft + 0.1);
+      });
+      root.querySelector('#gr-lock')?.addEventListener('click', () => {
+        if (!canRate || groupRateDraft == null) return;
+        const score = clampRateScore(groupRateDraft);
+        groupRateDraft = score;
+        send('rate_submit', { score });
+        refreshDraftUi();
+      });
+
+      root.querySelector('#gr-play')?.addEventListener('click', () => {
+        if (!song) return;
+        if (playSide === 'a' && audioEl && !audioEl.paused) {
+          hardStopAudio();
+          const icon = root.querySelector('#gr-play-icon');
+          if (icon) icon.textContent = '▶';
+          return;
+        }
+        playPreview(song, 'a');
+        const icon = root.querySelector('#gr-play-icon');
+        if (icon) icon.textContent = '❚❚';
+      });
+      // Manual play only (design: no autoplay next)
+    }
+
+    if (s.phase === 'rate_results') {
+      root.querySelectorAll('[data-gr-tab]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          groupRateResultsTab = btn.getAttribute('data-gr-tab') || 'cards';
+          render();
+        });
+      });
+      root.querySelector('#gr-continue')?.addEventListener('click', () => {
+        send('rate_continue');
+      });
+      root.querySelector('#p-new-lobby')?.addEventListener('click', () => {
+        hardStopAudio();
+        send('new_lobby');
+      });
+    }
 
     if (s.phase === 'match') {
       const sync = s.settings?.playMode === 'sync';

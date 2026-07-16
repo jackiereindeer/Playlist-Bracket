@@ -39,6 +39,8 @@ export const HOST_BACKUP_SECONDS = 300;
 export const IDLE_MS = 2 * 60 * 60 * 1000; // 2 hours
 export const MAX_NAME_LEN = 24;
 export const MAX_PLAYERS = 32;
+/** Group Rate allows a larger room (design lock). */
+export const MAX_PLAYERS_GROUP_RATE = 100;
 
 export const PHASE = {
   LOBBY: 'lobby',
@@ -47,4 +49,13 @@ export const PHASE = {
   TIE_BREAK: 'tie_break',
   WINNER: 'winner',
   CHAMPION: 'champion',
+  /** Group Rate: everyone rates the current song */
+  RATE_SONG: 'rate_song',
+  /** Group Rate: ranked results until everyone hits Continue */
+  RATE_RESULTS: 'rate_results',
+};
+
+export const GAME_MODE = {
+  BRACKET: 'bracket',
+  GROUP_RATE: 'group_rate',
 };

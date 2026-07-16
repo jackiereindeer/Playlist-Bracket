@@ -1973,7 +1973,7 @@ function onStartFromDraft() {
         entries: tracks.map((song) => ({ song, rating: null })),
         index: 0,
         finished: false,
-        draft: 5.0,
+        draft: null,
       };
       uiMode = 'rating';
       if (meta.source === 'youtube' || tracks.some(isYouTubeTrack)) {
@@ -2016,26 +2016,39 @@ function formatRating(n) {
 }
 
 function ratingDraftValue() {
-  if (!ratingSession) return 5;
+  if (!ratingSession) return null;
   if (ratingSession.draft != null && Number.isFinite(ratingSession.draft)) {
     return clampRating(ratingSession.draft);
   }
   const cur = ratingSession.entries[ratingSession.index];
   if (cur?.rating != null) return clampRating(cur.rating);
-  return 5;
+  return null;
 }
 
 function setRatingDraft(n) {
   if (!ratingSession || ratingSession.finished) return;
   ratingSession.draft = clampRating(n);
+  const hasPick = true;
   const big = document.getElementById('rating-big');
-  if (big) big.textContent = formatRating(ratingSession.draft);
+  if (big) {
+    big.textContent = formatRating(ratingSession.draft);
+    big.classList.remove('is-empty');
+  }
   const slider = document.getElementById('rating-slider');
-  if (slider) slider.value = String(ratingSession.draft);
+  if (slider) {
+    slider.disabled = false;
+    slider.value = String(ratingSession.draft);
+  }
+  document.getElementById('rating-minus')?.removeAttribute('disabled');
+  document.getElementById('rating-plus')?.removeAttribute('disabled');
+  document.querySelector('.rating-fine')?.classList.remove('is-disabled');
   document.querySelectorAll('[data-rating-btn]').forEach((btn) => {
     const v = Number(btn.getAttribute('data-rating-btn'));
     btn.classList.toggle('is-active', Math.floor(ratingSession.draft) === v);
   });
+  const next = document.getElementById('rating-next');
+  if (next) next.disabled = false;
+  void hasPick;
 }
 
 /**
@@ -2058,22 +2071,23 @@ function renderRatingSong(gen) {
     return;
   }
 
-  // Prefer existing rating when revisiting; else keep draft
+  // Prefer existing rating when revisiting; otherwise no pre-selected number
   if (entry.rating != null && Number.isFinite(entry.rating)) {
     session.draft = clampRating(entry.rating);
-  } else if (session.draft == null || !Number.isFinite(session.draft)) {
-    session.draft = 5.0;
-  } else {
+  } else if (session.draft != null && Number.isFinite(session.draft)) {
     session.draft = clampRating(session.draft);
+  } else {
+    session.draft = null;
   }
 
-  const draft = session.draft;
+  const hasPick = session.draft != null && Number.isFinite(session.draft);
+  const draft = hasPick ? session.draft : null;
   const art = song.image
     ? `<img class="rating-art" src="${escapeHtml(song.image)}" alt="" />`
     : `<div class="rating-art rating-art-fallback" aria-hidden="true">🎵</div>`;
   const yt = isYouTubeTrack(song);
   const buttons = Array.from({ length: 11 }, (_, i) => {
-    const active = Math.floor(draft) === i ? ' is-active' : '';
+    const active = hasPick && Math.floor(draft) === i ? ' is-active' : '';
     return `<button type="button" class="rating-num-btn${active}" data-rating-btn="${i}">${i}</button>`;
   }).join('');
 
@@ -2121,33 +2135,40 @@ function renderRatingSong(gen) {
         </div>
 
         <div class="rating-score-block">
-          <p class="rating-big" id="rating-big">${formatRating(draft)}</p>
-          <p class="muted small">Your rating</p>
+          <p class="rating-big${hasPick ? '' : ' is-empty'}" id="rating-big">${
+            hasPick ? formatRating(draft) : '—'
+          }</p>
+          <p class="muted small">${hasPick ? 'Your rating' : 'Pick a number 0–10'}</p>
         </div>
 
         <div class="rating-num-row" role="group" aria-label="Rating 0 to 10">
           ${buttons}
         </div>
 
-        <div class="rating-fine">
-          <button type="button" class="ghost small-btn" id="rating-minus" title="−0.1">−0.1</button>
+        <div class="rating-fine${hasPick ? '' : ' is-disabled'}">
+          <button type="button" class="ghost small-btn" id="rating-minus" title="−0.1" ${
+            hasPick ? '' : 'disabled'
+          }>−0.1</button>
           <input
             type="range"
             id="rating-slider"
             min="0"
             max="10"
             step="0.1"
-            value="${draft}"
+            value="${hasPick ? draft : 0}"
             aria-label="Fine rating"
+            ${hasPick ? '' : 'disabled'}
           />
-          <button type="button" class="ghost small-btn" id="rating-plus" title="+0.1">+0.1</button>
+          <button type="button" class="ghost small-btn" id="rating-plus" title="+0.1" ${
+            hasPick ? '' : 'disabled'
+          }>+0.1</button>
         </div>
 
         <div class="rating-actions form-actions">
           <button type="button" class="ghost" id="rating-back" ${idx === 0 ? 'disabled' : ''}>
             Back
           </button>
-          <button type="button" id="rating-next">
+          <button type="button" id="rating-next" ${hasPick ? '' : 'disabled'}>
             ${isLast ? 'Finish' : 'Next song'}
           </button>
         </div>
@@ -2163,24 +2184,30 @@ function wireRatingSong(gen, song, yt) {
   document.querySelectorAll('[data-rating-btn]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const whole = Number(btn.getAttribute('data-rating-btn'));
-      // Keep decimal part if user already refined, only when landing on same integer
       const cur = ratingDraftValue();
       const next =
-        Math.floor(cur) === whole && cur % 1 !== 0 ? cur : whole;
+        cur != null && Math.floor(cur) === whole && cur % 1 !== 0
+          ? cur
+          : whole;
       setRatingDraft(next);
     });
   });
 
   const slider = document.getElementById('rating-slider');
   slider?.addEventListener('input', () => {
+    if (ratingDraftValue() == null) return;
     setRatingDraft(Number(slider.value));
   });
 
   document.getElementById('rating-minus')?.addEventListener('click', () => {
-    setRatingDraft(ratingDraftValue() - 0.1);
+    const cur = ratingDraftValue();
+    if (cur == null) return;
+    setRatingDraft(cur - 0.1);
   });
   document.getElementById('rating-plus')?.addEventListener('click', () => {
-    setRatingDraft(ratingDraftValue() + 0.1);
+    const cur = ratingDraftValue();
+    if (cur == null) return;
+    setRatingDraft(cur + 0.1);
   });
 
   // Volume (shared with solo side-a so it feels familiar)
@@ -2203,21 +2230,24 @@ function wireRatingSong(gen, song, yt) {
 
   document.getElementById('rating-back')?.addEventListener('click', () => {
     if (!ratingSession || ratingSession.index <= 0) return;
-    // save current draft onto current song before leaving
+    // save current draft onto current song before leaving (only if picked)
     const cur = ratingSession.entries[ratingSession.index];
-    if (cur) cur.rating = ratingDraftValue();
+    const d = ratingDraftValue();
+    if (cur && d != null) cur.rating = d;
     disposeMedia({ removeTransition: true });
     ratingSession.index -= 1;
     const prev = ratingSession.entries[ratingSession.index];
     ratingSession.draft =
-      prev?.rating != null ? clampRating(prev.rating) : 5.0;
+      prev?.rating != null ? clampRating(prev.rating) : null;
     render();
   });
 
   document.getElementById('rating-next')?.addEventListener('click', () => {
     if (!ratingSession) return;
+    const d = ratingDraftValue();
+    if (d == null) return;
     const cur = ratingSession.entries[ratingSession.index];
-    if (cur) cur.rating = ratingDraftValue();
+    if (cur) cur.rating = d;
     disposeMedia({ removeTransition: true });
     if (ratingSession.index >= ratingSession.entries.length - 1) {
       ratingSession.finished = true;
@@ -2226,7 +2256,7 @@ function wireRatingSong(gen, song, yt) {
       ratingSession.index += 1;
       const next = ratingSession.entries[ratingSession.index];
       ratingSession.draft =
-        next?.rating != null ? clampRating(next.rating) : 5.0;
+        next?.rating != null ? clampRating(next.rating) : null;
     }
     render();
   });
@@ -2403,7 +2433,7 @@ function renderRatingResults(gen) {
       }));
       ratingSession.index = 0;
       ratingSession.finished = false;
-      ratingSession.draft = 5.0;
+      ratingSession.draft = null;
     }
     render();
   });
