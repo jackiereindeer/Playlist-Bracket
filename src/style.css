@@ -2860,6 +2860,26 @@ body[data-stage='quarters'] .vs-badge {
   font-size: 1.35rem;
 }
 
+/* Click playlist name / author / count to hide from share image */
+.results-meta-toggle {
+  cursor: pointer;
+  user-select: none;
+  transition: opacity 0.15s, text-decoration-color 0.15s;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 0.2em;
+}
+
+.results-meta-toggle:hover {
+  text-decoration-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.results-meta-toggle.is-off {
+  opacity: 0.35;
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--muted) 70%, transparent);
+}
+
 .rating-results-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));

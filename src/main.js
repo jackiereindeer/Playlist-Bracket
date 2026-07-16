@@ -2705,6 +2705,13 @@ function renderRatingResults(gen) {
     });
 
   const name = session.meta?.name || 'Your ratings';
+  const owner = String(session.meta?.owner || '').trim();
+  // Toggle visibility for header fields (also applied to image export)
+  if (!session.headerShow) {
+    session.headerShow = { title: true, author: true, count: true };
+  }
+  const hs = session.headerShow;
+
   const cards = ranked
     .map((e, rank) => {
       const art = e.song.image
@@ -2732,10 +2739,25 @@ function renderRatingResults(gen) {
     <div class="rating-page rating-results-page">
       ${brandHeaderHtml('Rating Mode')}
       <header class="rating-results-header card">
-        <h2>${escapeHtml(name)}</h2>
-        <p class="muted small">
-          ${ranked.length} song${ranked.length === 1 ? '' : 's'} rated
-        </p>
+        <h2
+          class="results-meta-toggle${hs.title ? '' : ' is-off'}"
+          data-meta="title"
+          title="Click to hide/show on export"
+        >${escapeHtml(name)}</h2>
+        ${
+          owner
+            ? `<p
+          class="muted small results-meta-toggle${hs.author ? '' : ' is-off'}"
+          data-meta="author"
+          title="Click to hide/show on export"
+        >${escapeHtml(owner)}</p>`
+            : ''
+        }
+        <p
+          class="muted small results-meta-toggle${hs.count ? '' : ' is-off'}"
+          data-meta="count"
+          title="Click to hide/show on export"
+        >${ranked.length} song${ranked.length === 1 ? '' : 's'}</p>
       </header>
       <div class="rating-results-grid" id="rating-results-grid">
         ${cards || '<p class="muted">No ratings.</p>'}
@@ -2752,6 +2774,15 @@ function renderRatingResults(gen) {
     </div>
   `;
 
+  document.querySelectorAll('.results-meta-toggle').forEach((el) => {
+    el.addEventListener('click', () => {
+      const key = el.getAttribute('data-meta');
+      if (!key || !session.headerShow) return;
+      session.headerShow[key] = !session.headerShow[key];
+      el.classList.toggle('is-off', !session.headerShow[key]);
+    });
+  });
+
   document.getElementById('rating-export-image')?.addEventListener('click', async () => {
     const btn = document.getElementById('rating-export-image');
     if (!btn || !ranked.length) return;
@@ -2760,7 +2791,10 @@ function renderRatingResults(gen) {
     btn.textContent = 'Making image…';
     try {
       const blob = await buildRatingResultsImageBlob(ranked, name, {
-        modeLabel: 'Rating Mode',
+        author: owner || null,
+        showTitle: session.headerShow?.title !== false,
+        showAuthor: session.headerShow?.author !== false,
+        showCount: session.headerShow?.count !== false,
       });
       await copyOrDownloadRatingImage(blob, btn, 'rating-results');
     } catch {

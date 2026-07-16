@@ -36,24 +36,49 @@ function formatScore(n) {
   return Number.isInteger(v) ? String(v) : v.toFixed(1);
 }
 
+function ellipsize(ctx, text, maxW) {
+  let t = String(text || '');
+  if (!t) return '';
+  while (ctx.measureText(t).width > maxW && t.length > 3) {
+    t = `${t.slice(0, -2)}…`;
+  }
+  return t;
+}
+
 /**
  * @param {Array<{ song: object, rating: number }>} ranked
- * @param {string} title
- * @param {{ modeLabel?: string }} [opts]
+ * @param {string} title - playlist name
+ * @param {{
+ *   author?: string|null,
+ *   showTitle?: boolean,
+ *   showAuthor?: boolean,
+ *   showCount?: boolean,
+ * }} [opts]
  * @returns {Promise<Blob>}
  */
 export async function buildRatingResultsImageBlob(ranked, title, opts = {}) {
-  const modeLabel = opts.modeLabel || 'Rating Mode';
+  const showTitle = opts.showTitle !== false;
+  const showAuthor = opts.showAuthor !== false && Boolean(opts.author);
+  const showCount = opts.showCount !== false;
+  const author = String(opts.author || '').trim();
+
   const n = ranked.length;
   const cols = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(n || 1))));
   const cell = 220;
   const gap = 16;
   const pad = 28;
-  const headerH = 88;
+  // Dynamic header: only for lines we show
+  let headerH = 20;
+  if (showTitle) headerH += 32;
+  if (showAuthor) headerH += 22;
+  if (showCount) headerH += 22;
+  if (!showTitle && !showAuthor && !showCount) headerH = 16;
+  else headerH += 12;
+
   const labelH = 52;
   const rows = Math.max(1, Math.ceil(n / cols));
   const width = pad * 2 + cols * cell + (cols - 1) * gap;
-  const height = pad * 2 + headerH + rows * (cell + labelH + gap) - gap;
+  const height = pad * 2 + headerH + rows * (cell + labelH + gap) - gap + 8;
 
   const canvas = document.createElement('canvas');
   const scale = 2;
@@ -79,14 +104,34 @@ export async function buildRatingResultsImageBlob(ranked, title, opts = {}) {
   ctx.arc(width * 0.85, height * 0.2, 100, 0, Math.PI * 2);
   ctx.fill();
 
-  ctx.fillStyle = '#f8fafc';
-  ctx.font = '700 26px system-ui, Segoe UI, sans-serif';
+  // Header: playlist name, author, song count (no "Rating Mode")
+  let hy = pad + 8;
   ctx.textAlign = 'left';
-  ctx.fillText(modeLabel, pad, pad + 28);
-  ctx.fillStyle = '#c4b5fd';
-  ctx.font = '600 16px system-ui, Segoe UI, sans-serif';
-  const sub = `${title} · ${n} song${n === 1 ? '' : 's'}`;
-  ctx.fillText(sub.length > 60 ? `${sub.slice(0, 57)}…` : sub, pad, pad + 54);
+  if (showTitle) {
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = '700 24px system-ui, Segoe UI, sans-serif';
+    ctx.fillText(
+      ellipsize(ctx, title || 'Playlist', width - pad * 2),
+      pad,
+      hy + 22
+    );
+    hy += 32;
+  }
+  if (showAuthor) {
+    ctx.fillStyle = '#c4b5fd';
+    ctx.font = '600 15px system-ui, Segoe UI, sans-serif';
+    ctx.fillText(ellipsize(ctx, author, width - pad * 2), pad, hy + 16);
+    hy += 24;
+  }
+  if (showCount) {
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '500 14px system-ui, Segoe UI, sans-serif';
+    ctx.fillText(
+      `${n} song${n === 1 ? '' : 's'}`,
+      pad,
+      hy + 14
+    );
+  }
 
   const images = await Promise.all(
     ranked.map((e) => loadImageForCanvas(e.song?.image || null))
@@ -145,7 +190,7 @@ export async function buildRatingResultsImageBlob(ranked, title, opts = {}) {
     ctx.textBaseline = 'middle';
     ctx.fillText(`#${i + 1}`, x + 31, y + 21);
 
-    // Score / group average over art — white fill + black outline
+    // Score / group average — white fill + black outline
     ctx.font = '800 52px system-ui, Segoe UI, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -163,21 +208,21 @@ export async function buildRatingResultsImageBlob(ranked, title, opts = {}) {
     ctx.font = '600 13px system-ui, sans-serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    let t = e.song?.name || 'Unknown';
-    while (ctx.measureText(t).width > cell - 4 && t.length > 3) {
-      t = `${t.slice(0, -2)}…`;
-    }
-    ctx.fillText(t, x, y + cell + 8);
+    ctx.fillText(
+      ellipsize(ctx, e.song?.name || 'Unknown', cell - 4),
+      x,
+      y + cell + 8
+    );
     ctx.fillStyle = '#94a3b8';
     ctx.font = '500 11px system-ui, sans-serif';
-    let a = e.song?.artists || '';
-    while (ctx.measureText(a).width > cell - 4 && a.length > 3) {
-      a = `${a.slice(0, -2)}…`;
-    }
-    ctx.fillText(a, x, y + cell + 26);
+    ctx.fillText(
+      ellipsize(ctx, e.song?.artists || '', cell - 4),
+      x,
+      y + cell + 26
+    );
   }
 
-  // Bottom-left site URL (small)
+  // Bottom-left site URL
   ctx.fillStyle = 'rgba(148, 163, 184, 0.85)';
   ctx.font = '500 9px system-ui, sans-serif';
   ctx.textAlign = 'left';

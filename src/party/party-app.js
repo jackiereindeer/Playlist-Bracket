@@ -1950,6 +1950,8 @@ export function startPartyApp(root, opts) {
   let groupRateDraft = null;
   let groupRateDraftSongIndex = -1;
   let groupRateResultsTab = 'cards'; // cards | matrix
+  /** Click-to-toggle playlist name / author / count on results + share image */
+  let groupRateHeaderShow = { title: true, author: true, count: true };
 
   /** Soft HUD refresh so lock-in broadcasts don’t wipe the player DOM. */
   function softUpdateGroupRateHud(s) {
@@ -2130,6 +2132,11 @@ export function startPartyApp(root, opts) {
     const readyTotal = gr.readyTotal || 0;
     const myReady = Boolean(gr.myReady);
     const tab = groupRateResultsTab;
+    const plName = gr.playlistName || s.playlist?.name || 'Group Rate';
+    const plOwner = String(
+      gr.playlistOwner || s.playlist?.owner || ''
+    ).trim();
+    const hs = groupRateHeaderShow;
 
     const myId = s.you?.id;
     const cards = ranking
@@ -2216,8 +2223,25 @@ export function startPartyApp(root, opts) {
     return `
       <div class="card party-group-rate-results">
         <header class="rating-results-header">
-          <h2>${esc(gr.playlistName || s.playlist?.name || 'Group Rate')}</h2>
-          <p class="muted small">${ranking.length} songs · sorted by average (high → low)</p>
+          <h2
+            class="results-meta-toggle${hs.title ? '' : ' is-off'}"
+            data-gr-meta="title"
+            title="Click to hide/show on export"
+          >${esc(plName)}</h2>
+          ${
+            plOwner
+              ? `<p
+            class="muted small results-meta-toggle${hs.author ? '' : ' is-off'}"
+            data-gr-meta="author"
+            title="Click to hide/show on export"
+          >${esc(plOwner)}</p>`
+              : ''
+          }
+          <p
+            class="muted small results-meta-toggle${hs.count ? '' : ' is-off'}"
+            data-gr-meta="count"
+            title="Click to hide/show on export"
+          >${ranking.length} song${ranking.length === 1 ? '' : 's'}</p>
         </header>
         <div class="gr-tabs">
           <button type="button" class="ghost small-btn${
@@ -2932,6 +2956,14 @@ export function startPartyApp(root, opts) {
           render();
         });
       });
+      root.querySelectorAll('[data-gr-meta]').forEach((el) => {
+        el.addEventListener('click', () => {
+          const key = el.getAttribute('data-gr-meta');
+          if (!key || !(key in groupRateHeaderShow)) return;
+          groupRateHeaderShow[key] = !groupRateHeaderShow[key];
+          el.classList.toggle('is-off', !groupRateHeaderShow[key]);
+        });
+      });
       root.querySelector('#gr-continue')?.addEventListener('click', () => {
         send('rate_continue');
       });
@@ -2970,8 +3002,14 @@ export function startPartyApp(root, opts) {
           }));
           const title =
             gr.playlistName || s.playlist?.name || 'Group Rate';
+          const author = String(
+            gr.playlistOwner || s.playlist?.owner || ''
+          ).trim();
           const blob = await buildRatingResultsImageBlob(ranked, title, {
-            modeLabel: 'Group Rate',
+            author: author || null,
+            showTitle: groupRateHeaderShow.title !== false,
+            showAuthor: groupRateHeaderShow.author !== false,
+            showCount: groupRateHeaderShow.count !== false,
           });
           await copyOrDownloadRatingImage(blob, btn, 'group-rate-results');
         } catch {
