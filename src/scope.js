@@ -20,8 +20,18 @@ let lastFrame = 0;
 let phase = 0;
 let energy = 0;
 let targetEnergy = 0;
+/** Smoothed 0–1 from the loudest playing preview’s volume slider. */
+let volumeLevel = 0;
 let rumble = 0;
 let bright = 0;
+
+const AUDIO_IDS = [
+  'audio-a',
+  'audio-b',
+  'audio-champion',
+  'audio-transition',
+  'audio-champion-bed',
+];
 
 function cssAccent() {
   try {
@@ -67,17 +77,44 @@ function sizeCanvas() {
 }
 
 function anyMediaPlaying() {
-  for (const id of [
-    'audio-a',
-    'audio-b',
-    'audio-champion',
-    'audio-transition',
-    'audio-champion-bed',
-  ]) {
+  for (const id of AUDIO_IDS) {
     const el = document.getElementById(id);
     if (el && !el.paused && !el.ended) return true;
   }
   return false;
+}
+
+/**
+ * Volume of the currently playing preview (0–1).
+ * Uses the <audio>.volume that the sliders write to in real time.
+ * If several play (shouldn't), takes the loudest.
+ */
+function getPlaybackVolume() {
+  let maxVol = 0;
+  let anyPlaying = false;
+
+  for (const id of AUDIO_IDS) {
+    const el = document.getElementById(id);
+    if (!el || el.paused || el.ended) continue;
+    anyPlaying = true;
+    const v = typeof el.volume === 'number' && Number.isFinite(el.volume) ? el.volume : 0;
+    if (v > maxVol) maxVol = v;
+  }
+
+  if (!anyPlaying) return 0;
+  return Math.min(1, Math.max(0, maxVol));
+}
+
+/**
+ * Map linear slider 0–1 → a punchier visual gain.
+ * Quiet = almost flat; loud = big / busy scope.
+ */
+function visualGainFromVolume(vol01) {
+  // Dead zone near silence, then strong curve
+  if (vol01 <= 0.02) return 0;
+  // Ease-in power curve so mid→high is dramatic
+  const t = (vol01 - 0.02) / 0.98;
+  return Math.pow(t, 1.35);
 }
 
 /** Push fresh noise into the ring (scrolls left→right like live samples). */
@@ -96,59 +133,59 @@ function readNoise(i) {
 }
 
 /**
- * Build a dense waveform: lots of zero-crossings across the width,
- * shaped by a slow envelope — reads as audio, not an ECG blip.
+ * Dense waveform driven by play state + user volume gain (0–1).
  */
-function synthesize(playing, dt) {
-  targetEnergy = playing ? 1 : 0;
-  energy += (targetEnergy - energy) * Math.min(1, dt * 7);
-  if (energy < 0.02) {
+function synthesize(playing, volGain, dt) {
+  targetEnergy = playing && volGain > 0.01 ? volGain : 0;
+  // Track volume quickly so slider drags feel instant
+  energy += (targetEnergy - energy) * Math.min(1, dt * (playing ? 14 : 7));
+  volumeLevel += (volGain - volumeLevel) * Math.min(1, dt * 18);
+
+  if (energy < 0.015) {
     wave.fill(0);
     return 0;
   }
 
-  phase += dt * (18 + energy * 28);
-  // How many new “samples” to scroll in this frame
-  const scroll = Math.max(4, Math.floor(dt * 900 * (0.7 + energy)));
+  const g = energy;
+  phase += dt * (12 + g * 40);
+  const scroll = Math.max(2, Math.floor(dt * (200 + g * 1400)));
   advanceNoise(scroll);
 
-  // Slow amplitude “music” motion
-  rumble += dt * 2.4;
-  bright += dt * 5.1;
+  rumble += dt * (1.2 + g * 3.2);
+  bright += dt * (2.5 + g * 6);
   const envSlow =
-    0.55 +
-    0.25 * Math.sin(rumble) +
-    0.2 * Math.sin(rumble * 0.37 + 1.1);
+    0.5 +
+    0.28 * Math.sin(rumble) +
+    0.22 * Math.sin(rumble * 0.37 + 1.1);
 
   let sumSq = 0;
+  const dens = 28 + g * 55;
   for (let i = 0; i < BUF; i++) {
     const t = i / (BUF - 1);
     const n0 = readNoise(i);
     const n1 = readNoise((i * 3 + 17) % BUF);
     const n2 = readNoise((i * 7 + 41) % BUF);
 
-    // Dense carriers — many cycles across the screen (this kills the heartbeat look)
-    const c1 = Math.sin(phase * 1.0 + t * Math.PI * 2 * 48);
-    const c2 = Math.sin(phase * 1.7 + t * Math.PI * 2 * 73);
-    const c3 = Math.sin(phase * 0.6 + t * Math.PI * 2 * 31);
+    const c1 = Math.sin(phase * 1.0 + t * Math.PI * 2 * dens);
+    const c2 = Math.sin(phase * 1.7 + t * Math.PI * 2 * dens * 1.52);
+    const c3 = Math.sin(phase * 0.6 + t * Math.PI * 2 * dens * 0.65);
 
-    // Local envelope so amplitude jumps along the trace
     const localEnv =
-      0.4 +
-      0.6 * Math.abs(Math.sin(t * Math.PI * 6 + bright)) *
+      0.35 +
+      0.65 * Math.abs(Math.sin(t * Math.PI * 6 + bright)) *
         (0.5 + 0.5 * Math.sin(t * Math.PI * 13 + phase * 0.2));
 
+    const noiseW = 0.25 + g * 0.75;
     let s =
-      n0 * 0.72 +
-      n1 * 0.28 +
-      n2 * 0.12 +
-      c1 * 0.18 +
+      n0 * 0.72 * noiseW +
+      n1 * 0.28 * noiseW +
+      n2 * 0.12 * noiseW +
+      c1 * 0.16 +
       c2 * 0.1 +
       c3 * 0.08;
 
-    s *= localEnv * envSlow * energy;
-    // Soft clip like overloaded scope
-    s = Math.tanh(s * 1.6);
+    s *= localEnv * envSlow * g;
+    s = Math.tanh(s * (1.1 + g * 1.2));
     wave[i] = s;
     sumSq += s * s;
   }
@@ -168,7 +205,10 @@ function drawFrame(now) {
 
   const tNow = now || performance.now();
   const playing = anyMediaPlaying();
-  if (!playing && energy < 0.025 && tNow - lastFrame < 48) {
+  const rawVol = playing ? getPlaybackVolume() : 0;
+  const volGain = playing ? visualGainFromVolume(rawVol) : 0;
+
+  if (!playing && energy < 0.02 && tNow - lastFrame < 48) {
     rafId = requestAnimationFrame(drawFrame);
     return;
   }
@@ -182,14 +222,13 @@ function drawFrame(now) {
 
   c2d.clearRect(0, 0, w, h);
 
-  const rms = synthesize(playing, dt);
-  // Slim vertical band — detail comes from density, not height
-  const band = h * 0.1;
-  // Draw almost every sample so the line is fine and busy
+  const rms = synthesize(playing, volGain, dt);
+  // Band height scales hard with volume: whisper → hairline, max → ~22% of screen
+  const band = h * (0.02 + volumeLevel * 0.2);
   const step = Math.max(1, Math.floor(BUF / Math.min(BUF, w * 1.25)));
 
-  if (energy > 0.025) {
-    const amp = 0.75 + rms * 0.6;
+  if (energy > 0.015) {
+    const amp = 0.55 + rms * 0.9 + volumeLevel * 0.45;
 
     c2d.lineJoin = 'round';
     c2d.lineCap = 'round';
@@ -210,16 +249,25 @@ function drawFrame(now) {
       c2d.stroke();
     };
 
-    // Thin glow + thin core (not a fat hospital trace)
-    stroke(0.16 + energy * 0.12, Math.max(1.5, (w / 1400) * 2.5), 10);
-    stroke(0.5 + energy * 0.25, Math.max(0.9, (w / 1400) * 1.15), 2);
+    // Opacity / glow / thickness all follow the slider
+    const g = volumeLevel;
+    stroke(
+      0.06 + g * 0.28,
+      Math.max(1, (w / 1400) * (1.2 + g * 3.2)),
+      4 + g * 22
+    );
+    stroke(
+      0.2 + g * 0.65,
+      Math.max(0.8, (w / 1400) * (0.8 + g * 1.6)),
+      1 + g * 6
+    );
 
     c2d.shadowBlur = 0;
     c2d.globalAlpha = 1;
   } else {
     c2d.beginPath();
     c2d.strokeStyle = accent;
-    c2d.globalAlpha = 0.07;
+    c2d.globalAlpha = 0.06;
     c2d.lineWidth = 1;
     c2d.moveTo(0, midY);
     c2d.lineTo(w, midY);
@@ -245,8 +293,10 @@ export function startScope() {
 
 export function kickScopeFromPlayback() {
   startScope();
-  targetEnergy = 1;
-  energy = Math.max(energy, 0.55);
+  const g = visualGainFromVolume(getPlaybackVolume() || 0.35);
+  targetEnergy = g;
+  energy = Math.max(energy, g * 0.85);
+  volumeLevel = Math.max(volumeLevel, g);
   advanceNoise(80);
 }
 
