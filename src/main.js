@@ -2082,6 +2082,138 @@ function groupHistoryByRound(history) {
   }));
 }
 
+/** Split history into left/right/cross/final columns for the classic map. */
+function partitionBracketHistory(history) {
+  const leftByWave = new Map();
+  const rightByWave = new Map();
+  const crossByWave = new Map();
+  const finals = [];
+
+  for (const m of history) {
+    if (m.region === 'final') {
+      finals.push(m);
+      continue;
+    }
+    if (m.region === 'cross') {
+      if (!crossByWave.has(m.round)) crossByWave.set(m.round, []);
+      crossByWave.get(m.round).push(m);
+      continue;
+    }
+    const map = m.region === 'right' ? rightByWave : leftByWave;
+    if (!map.has(m.round)) map.set(m.round, []);
+    map.get(m.round).push(m);
+  }
+
+  return {
+    leftByWave,
+    rightByWave,
+    crossByWave,
+    finals,
+    leftWaves: [...leftByWave.keys()].sort((a, b) => a - b),
+    rightWaves: [...rightByWave.keys()].sort((a, b) => a - b),
+  };
+}
+
+function waveLabelForParts(parts, wave, matches, initialCount) {
+  const leftN = (parts.leftByWave.get(wave) || []).length;
+  const rightN = (parts.rightByWave.get(wave) || []).length;
+  const crossN = (parts.crossByWave.get(wave) || []).length;
+  const approxSongs = (leftN + rightN) * 2 + crossN * 2;
+  if (matches.length === 1 && leftN + rightN + crossN === 1) {
+    return mmRoundLabel(matches, initialCount);
+  }
+  if (approxSongs === 2) return 'Final';
+  if (approxSongs === 4) return 'Semis';
+  if (approxSongs === 8) return 'Quarters';
+  if (approxSongs === 16) return 'Round of 16';
+  if (approxSongs === 32) return 'Round of 32';
+  if (approxSongs === 64) return 'Round of 64';
+  const allWaves = [...parts.leftWaves, ...parts.rightWaves];
+  if (allWaves.length && wave === Math.min(...allWaves) && initialCount) {
+    return `${initialCount} songs`;
+  }
+  if (approxSongs > 0) return `${approxSongs} songs left`;
+  return mmRoundLabel(matches, initialCount);
+}
+
+function mmCenterHtml(parts, champion) {
+  const finalMatch = parts.finals[parts.finals.length - 1];
+  const crossCols = [...parts.crossByWave.keys()]
+    .sort((a, b) => a - b)
+    .map((w) => mmRoundColumn(parts.crossByWave.get(w), 'Play-in', 'mm-cross-round'))
+    .join('');
+
+  return `
+    <div class="mm-center">
+      ${crossCols}
+      ${
+        finalMatch
+          ? `
+        <div class="mm-round mm-final-round">
+          <div class="mm-round-label">Final</div>
+          <div class="mm-round-matches">${mmMatchHtml(finalMatch)}</div>
+        </div>
+      `
+          : ''
+      }
+      ${
+        champion
+          ? `
+        <div class="mm-round mm-champ-round">
+          <div class="mm-round-label">Champion</div>
+          <div class="mm-round-matches">
+            <div class="mm-match mm-champ-match">
+              ${mmCoverHtml(champion, 'winner')}
+              <span class="mm-champ-crown" aria-hidden="true">🏆</span>
+            </div>
+          </div>
+        </div>
+      `
+          : ''
+      }
+    </div>
+  `;
+}
+
+function densityClass(parts) {
+  const maxM = Math.max(
+    1,
+    ...[...parts.leftByWave.values(), ...parts.rightByWave.values()].map((x) => x.length),
+    1
+  );
+  return maxM > 24 ? 'mm-dense' : maxM > 12 ? 'mm-mid' : 'mm-roomy';
+}
+
+/** Original dual-region March Madness map. */
+function buildClassicBracketView(history, champion, initialCount) {
+  const parts = partitionBracketHistory(history);
+  const dens = densityClass(parts);
+  const waveLabel = (w, matches) => waveLabelForParts(parts, w, matches, initialCount);
+
+  const leftCols = parts.leftWaves
+    .map((w) =>
+      mmRoundColumn(parts.leftByWave.get(w), waveLabel(w, parts.leftByWave.get(w)), 'mm-side-left')
+    )
+    .join('');
+
+  const rightCols = [...parts.rightWaves]
+    .reverse()
+    .map((w) =>
+      mmRoundColumn(parts.rightByWave.get(w), waveLabel(w, parts.rightByWave.get(w)), 'mm-side-right')
+    )
+    .join('');
+
+  return `
+    <div class="mm-bracket-scroll">
+      <div class="mm-bracket mm-classic ${dens}">
+        <div class="mm-half mm-half-left">${leftCols}</div>
+        ${mmCenterHtml(parts, champion)}
+        <div class="mm-half mm-half-right">${rightCols}</div>
+      </div>
+    </div>
+  `;
+}
+
 /**
  * Name a wave from how many songs played in it (2 × match count).
  * Finals / power-of-two fields get classic labels.
@@ -2182,15 +2314,19 @@ function buildBracketHtml(history, champion) {
 
   const initialCount = state?.initialCount || 0;
   const waves = groupHistoryByRound(history);
-  // Earliest wave first (Round of 64 → … → Final)
-  const tabs = waves.map((w, i) => ({
+  // Earliest wave first (Round of 64 → … → Final), then classic map
+  const roundTabs = waves.map((w) => ({
     id: `round-${w.round}`,
     label: labelForRoundMatches(w.matches, initialCount),
     matches: w.matches,
-    index: i,
   }));
 
-  const defaultTab = tabs[0]?.id || 'round-1';
+  const tabs = [
+    ...roundTabs,
+    { id: 'bracket-view', label: 'Bracket view', matches: null },
+  ];
+
+  const defaultTab = tabs[0]?.id || 'bracket-view';
 
   const tabBar = tabs
     .map(
@@ -2206,7 +2342,7 @@ function buildBracketHtml(history, champion) {
     )
     .join('');
 
-  const panels = tabs
+  const roundPanels = roundTabs
     .map(
       (t) => `
       <div
@@ -2221,10 +2357,22 @@ function buildBracketHtml(history, champion) {
     )
     .join('');
 
+  const classicPanel = `
+    <div
+      class="bracket-panel"
+      data-bracket-panel="bracket-view"
+      role="tabpanel"
+      ${defaultTab === 'bracket-view' ? '' : 'hidden'}
+    >
+      <p class="bracket-hint muted small">Full dual-region bracket — scroll sideways if needed.</p>
+      ${buildClassicBracketView(history, champion, initialCount)}
+    </div>
+  `;
+
   return `
     <div class="bracket-explorer" id="bracket-explorer">
       <div class="bracket-tabs" role="tablist" aria-label="Tournament rounds">${tabBar}</div>
-      <div class="bracket-panels">${panels}</div>
+      <div class="bracket-panels">${roundPanels}${classicPanel}</div>
     </div>
   `;
 }
