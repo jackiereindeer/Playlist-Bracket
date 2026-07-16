@@ -23,6 +23,108 @@ const previewCache = Object.create(null);
 let renderGeneration = 0;
 let loadGeneration = 0;
 
+const STORAGE_KEY = 'playlist-bracket-save-v1';
+
+function serializeState(s) {
+  if (!s) return null;
+  const byeCounts =
+    s.byeCounts instanceof Map
+      ? Object.fromEntries(s.byeCounts)
+      : s.byeCounts && typeof s.byeCounts === 'object'
+        ? s.byeCounts
+        : {};
+  return {
+    playlist: s.playlist,
+    seeding: s.seeding,
+    initialCount: s.initialCount,
+    history: s.history,
+    byeCounts,
+    left: s.left,
+    right: s.right,
+    finalMatch: s.finalMatch,
+    matches: s.matches,
+    matchIndex: s.matchIndex,
+    roundNumber: s.roundNumber,
+    remaining: s.remaining,
+    bye: s.bye,
+    winners: s.winners,
+    champion: s.champion,
+    finished: s.finished,
+  };
+}
+
+function deserializeState(data) {
+  if (!data || typeof data !== 'object') return null;
+  if (!data.playlist || !data.left || !data.right) return null;
+  if (!Array.isArray(data.history) || !Array.isArray(data.matches)) return null;
+  if (typeof data.matchIndex !== 'number' || typeof data.roundNumber !== 'number') {
+    return null;
+  }
+
+  const byeEntries = Object.entries(data.byeCounts || {}).map(([k, v]) => [
+    k,
+    Number(v) || 0,
+  ]);
+
+  return {
+    ...data,
+    byeCounts: new Map(byeEntries),
+    winners: Array.isArray(data.winners) ? data.winners : [],
+    finished: Boolean(data.finished),
+  };
+}
+
+function saveProgress() {
+  try {
+    if (!state) {
+      localStorage.removeItem(STORAGE_KEY);
+      return;
+    }
+    const payload = {
+      version: 1,
+      savedAt: Date.now(),
+      state: serializeState(state),
+      volumeBySide: { ...volumeBySide },
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+  }
+}
+
+function clearSavedProgress() {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+  }
+}
+
+function loadProgress() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const payload = JSON.parse(raw);
+    const restored = deserializeState(payload?.state);
+    if (!restored) {
+      clearSavedProgress();
+      return null;
+    }
+    if (
+      payload.volumeBySide &&
+      typeof payload.volumeBySide.a === 'number' &&
+      typeof payload.volumeBySide.b === 'number'
+    ) {
+      volumeBySide = {
+        a: Math.min(1, Math.max(0, payload.volumeBySide.a)),
+        b: Math.min(1, Math.max(0, payload.volumeBySide.b)),
+      };
+    }
+    return restored;
+  } catch {
+    clearSavedProgress();
+    return null;
+  }
+}
+
 function escapeHtml(str) {
   return String(str ?? '')
     .replaceAll('&', '&amp;')
@@ -736,10 +838,12 @@ async function onStart(e) {
 
     state = createTournament(data, data.tracks, seeding);
     shareMsg = '';
+    saveProgress();
   } catch (err) {
     if (myLoad !== loadGeneration) return;
     error = err.message || 'Could not start tournament.';
     state = null;
+    clearSavedProgress();
   } finally {
     if (myLoad !== loadGeneration) return;
     loading = false;
@@ -756,6 +860,7 @@ function onPick(side) {
 
   state = pickWinner(state, side);
   shareMsg = '';
+  saveProgress();
 
   if (state.finished) {
     scheduleTransition(
@@ -789,6 +894,7 @@ function onQuit() {
   clearTransitionTimer();
   roundTransition = null;
   clearPreviewCache();
+  clearSavedProgress();
   state = null;
   error = '';
   shareMsg = '';
@@ -841,5 +947,11 @@ app.addEventListener('click', (e) => {
   e.preventDefault();
   goHome();
 });
+
+const restored = loadProgress();
+if (restored) {
+  state = restored;
+  roundTransition = null;
+}
 
 render();
