@@ -2103,6 +2103,23 @@ function renderRatingSong(gen) {
         <h2 class="rating-title">${escapeHtml(song.name || 'Unknown')}</h2>
         <p class="rating-artists muted">${escapeHtml(song.artists || '')}</p>
 
+        <div class="rating-vol volume-control">
+          <span class="volume-icon" aria-hidden="true">🔊</span>
+          <input
+            type="range"
+            class="volume-slider"
+            id="rating-vol"
+            min="0"
+            max="100"
+            step="1"
+            value="${Math.round((volumeBySide.a ?? DEFAULT_MATCH_VOLUME) * 100)}"
+            aria-label="Volume"
+          />
+          <span class="volume-pct" id="rating-vol-pct">${Math.round(
+            (volumeBySide.a ?? DEFAULT_MATCH_VOLUME) * 100
+          )}%</span>
+        </div>
+
         <div class="rating-score-block">
           <p class="rating-big" id="rating-big">${formatRating(draft)}</p>
           <p class="muted small">Your rating</p>
@@ -2164,6 +2181,24 @@ function wireRatingSong(gen, song, yt) {
   });
   document.getElementById('rating-plus')?.addEventListener('click', () => {
     setRatingDraft(ratingDraftValue() + 0.1);
+  });
+
+  // Volume (shared with solo side-a so it feels familiar)
+  const volSlider = document.getElementById('rating-vol');
+  const volPct = document.getElementById('rating-vol-pct');
+  volSlider?.addEventListener('input', () => {
+    const vol = Math.min(1, Math.max(0, Number(volSlider.value) / 100));
+    volumeBySide.a = vol;
+    if (volPct) volPct.textContent = `${Math.round(vol * 100)}%`;
+    const audio = document.getElementById('audio-a');
+    if (audio) {
+      try {
+        audio.volume = vol;
+      } catch {
+      }
+    }
+    setYouTubeVolume('rating', vol);
+    if (song?.id) rememberTrackVolume(song.id, vol);
   });
 
   document.getElementById('rating-back')?.addEventListener('click', () => {

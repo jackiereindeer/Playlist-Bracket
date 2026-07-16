@@ -2669,6 +2669,28 @@ body[data-stage='quarters'] .vs-badge {
   font-size: 0.95rem;
 }
 
+.rating-vol {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  max-width: 16rem;
+  margin: 0.15rem 0 0.25rem;
+}
+
+.rating-vol .volume-slider {
+  flex: 1;
+  min-width: 0;
+}
+
+.rating-vol .volume-pct {
+  min-width: 2.5rem;
+  text-align: right;
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .rating-score-block {
   margin: 0.4rem 0 0.15rem;
 }
