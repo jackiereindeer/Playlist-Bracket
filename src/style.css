@@ -1040,6 +1040,50 @@ body.on-setup {
   transform: none;
 }
 
+/* Seek scrubber under the miniplayer */
+.yt-seek-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-top: 0.45rem;
+  width: 100%;
+}
+
+.yt-time {
+  flex: 0 0 auto;
+  min-width: 2.25rem;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.yt-time-end {
+  text-align: right;
+}
+
+.yt-seek {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  height: 0.35rem;
+  margin: 0;
+  accent-color: var(--accent, #c4b5fd);
+  cursor: pointer;
+}
+
+.yt-seek:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.champion-cover .yt-seek-row {
+  margin-top: 0.55rem;
+  max-width: 280px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
 .cover-play-btn {
   position: relative;
   display: block;

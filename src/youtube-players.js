@@ -217,3 +217,52 @@ export function pauseYouTube(side) {
   } catch {
   }
 }
+
+/** Current time in seconds (0 if unavailable). */
+export function getYouTubeCurrentTime(side) {
+  const p = players.get(side);
+  if (!p) return 0;
+  try {
+    const t = p.getCurrentTime?.();
+    return typeof t === 'number' && Number.isFinite(t) ? t : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Duration in seconds (0 if unavailable / not ready). */
+export function getYouTubeDuration(side) {
+  const p = players.get(side);
+  if (!p) return 0;
+  try {
+    const d = p.getDuration?.();
+    return typeof d === 'number' && Number.isFinite(d) && d > 0 ? d : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Seek to a fraction 0–1 of the video (or absolute seconds if absoluteSeconds is set).
+ */
+export function seekYouTube(side, value, { absoluteSeconds = false } = {}) {
+  const p = players.get(side);
+  if (!p) return;
+  try {
+    let seconds = value;
+    if (!absoluteSeconds) {
+      const dur = getYouTubeDuration(side);
+      if (dur <= 0) return;
+      seconds = Math.min(1, Math.max(0, value)) * dur;
+    }
+    p.seekTo(seconds, true);
+  } catch {
+  }
+}
+
+export function formatYouTubeTime(seconds) {
+  const s = Math.max(0, Math.floor(seconds || 0));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${String(r).padStart(2, '0')}`;
+}

@@ -25,6 +25,10 @@ import {
   youtubeIsPlaying,
   playYouTube,
   pauseYouTube,
+  getYouTubeCurrentTime,
+  getYouTubeDuration,
+  seekYouTube,
+  formatYouTubeTime,
 } from './youtube-players.js';
 
 const app = document.querySelector('#app');
@@ -1012,6 +1016,21 @@ function songCardHtml(song, side) {
                   <span class="cover-art">${art}</span>
                   <span class="cover-play-icon" id="play-icon-${side}" aria-hidden="true">▶</span>
                 </button>
+              </div>
+              <div class="yt-seek-row">
+                <span class="yt-time" id="yt-time-${side}">0:00</span>
+                <input
+                  type="range"
+                  class="yt-seek"
+                  id="yt-seek-${side}"
+                  min="0"
+                  max="1000"
+                  step="1"
+                  value="0"
+                  aria-label="Seek in ${escapeHtml(song.name)}"
+                  disabled
+                />
+                <span class="yt-time yt-time-end" id="yt-dur-${side}">0:00</span>
               </div>`
             : `<audio id="audio-${side}" preload="none"></audio>
         <button
@@ -1109,6 +1128,74 @@ function stillCurrent(gen, el) {
   return gen === renderGeneration && el != null && el.isConnected;
 }
 
+function wireYouTubeSeekBar(side, gen) {
+  const seek = document.getElementById(`yt-seek-${side}`);
+  const timeEl = document.getElementById(`yt-time-${side}`);
+  const durEl = document.getElementById(`yt-dur-${side}`);
+  if (!seek) return () => {};
+
+  let scrubbing = false;
+  let pollId = 0;
+
+  const update = () => {
+    if (!stillCurrent(gen, seek)) return;
+    const dur = getYouTubeDuration(side);
+    const cur = getYouTubeCurrentTime(side);
+    if (durEl && dur > 0) durEl.textContent = formatYouTubeTime(dur);
+    if (timeEl) timeEl.textContent = formatYouTubeTime(cur);
+    if (!scrubbing && dur > 0) {
+      seek.value = String(Math.round((cur / dur) * 1000));
+    }
+    seek.disabled = dur <= 0;
+  };
+
+  const startPoll = () => {
+    if (pollId) return;
+    pollId = window.setInterval(() => {
+      if (!stillCurrent(gen, seek)) {
+        stopPoll();
+        return;
+      }
+      update();
+    }, 250);
+  };
+
+  const stopPoll = () => {
+    if (pollId) {
+      clearInterval(pollId);
+      pollId = 0;
+    }
+  };
+
+  seek.addEventListener('pointerdown', () => {
+    scrubbing = true;
+  });
+  seek.addEventListener('pointerup', () => {
+    scrubbing = false;
+  });
+  seek.addEventListener('input', () => {
+    if (!stillCurrent(gen, seek)) return;
+    scrubbing = true;
+    const dur = getYouTubeDuration(side);
+    if (dur <= 0) return;
+    const frac = Number(seek.value) / 1000;
+    if (timeEl) timeEl.textContent = formatYouTubeTime(frac * dur);
+  });
+  seek.addEventListener('change', () => {
+    if (!stillCurrent(gen, seek)) return;
+    const frac = Number(seek.value) / 1000;
+    seekYouTube(side, frac);
+    scrubbing = false;
+    update();
+  });
+
+  // Keep polling whenever this side exists (cheap); updates times while paused too
+  startPoll();
+  update();
+
+  return () => stopPoll();
+}
+
 function wireYouTubeOnePlayer(side, song, volumeKey, gen, options = {}) {
   const { autoplay = false } = options;
   const playBtn = document.getElementById(`play-${side}`);
@@ -1145,6 +1232,8 @@ function wireYouTubeOnePlayer(side, song, volumeKey, gen, options = {}) {
     });
   }
 
+  const stopSeekPoll = wireYouTubeSeekBar(side, gen);
+
   playBtn.disabled = true;
   if (status) {
     status.hidden = false;
@@ -1168,11 +1257,16 @@ function wireYouTubeOnePlayer(side, song, volumeKey, gen, options = {}) {
         onEnded: () => {
           if (!stillCurrent(gen, playBtn)) return;
           setPlayingUi(side, false);
+          const seek = document.getElementById(`yt-seek-${side}`);
+          if (seek) seek.value = '0';
         },
       });
     })
     .then((player) => {
-      if (!stillCurrent(gen, playBtn)) return;
+      if (!stillCurrent(gen, playBtn)) {
+        stopSeekPoll();
+        return;
+      }
       playBtn.disabled = false;
       if (!player) {
         playBtn.classList.add('no-preview');
@@ -1208,6 +1302,7 @@ function wireYouTubeOnePlayer(side, song, volumeKey, gen, options = {}) {
       }
     })
     .catch(() => {
+      stopSeekPoll();
       if (!stillCurrent(gen, playBtn)) return;
       playBtn.disabled = false;
       playBtn.classList.add('no-preview');
@@ -1598,6 +1693,21 @@ function renderResults(gen) {
                         : '▶'
                     }</span>
                   </button>
+                </div>
+                <div class="yt-seek-row">
+                  <span class="yt-time" id="yt-time-champion">0:00</span>
+                  <input
+                    type="range"
+                    class="yt-seek"
+                    id="yt-seek-champion"
+                    min="0"
+                    max="1000"
+                    step="1"
+                    value="0"
+                    aria-label="Seek in champion"
+                    disabled
+                  />
+                  <span class="yt-time yt-time-end" id="yt-dur-champion">0:00</span>
                 </div>`
               : `<audio id="audio-champion" preload="none"></audio>
           <button
@@ -1636,6 +1746,13 @@ function renderResults(gen) {
   document.getElementById('new-game-btn')?.addEventListener('click', onQuit);
   // Bind UI only — never restart the bed if reveal already started it
   wireChampionBedUi(champion, gen);
+  if (isYouTubeTrack(champion)) {
+    // Seek bar follows whichever host is active (inline champion preferred)
+    wireYouTubeSeekBar(
+      document.getElementById('yt-champion') ? 'champion' : 'champion-bed',
+      gen
+    );
+  }
 }
 
 function mmRoundLabel(matches, initialCount) {
