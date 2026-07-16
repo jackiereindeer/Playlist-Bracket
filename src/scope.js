@@ -1,10 +1,14 @@
 /**
- * Subtle center-band oscilloscope backdrop.
- * Plain visual layer only — never routes <audio> (keeps previews working).
+ * Subtle center-band scope. Dense high-frequency squiggle (like a real
+ * time-domain analyser), not a slow multi-sine “heartbeat”.
+ * Visual only — never touches <audio> playback.
  */
 
-const BUF = 1024;
+const BUF = 2048;
 const wave = new Float32Array(BUF);
+// Ring of recent noise samples for a continuous, non-looping hiss
+const noiseRing = new Float32Array(BUF);
+let noiseWrite = 0;
 
 let canvas = null;
 let c2d = null;
@@ -16,14 +20,8 @@ let lastFrame = 0;
 let phase = 0;
 let energy = 0;
 let targetEnergy = 0;
-// A few drifting partials — enough motion without static noise
-const partials = [
-  { f: 2.1, p: 0, a: 1.0 },
-  { f: 3.4, p: 1.2, a: 0.55 },
-  { f: 5.8, p: 0.4, a: 0.32 },
-  { f: 8.3, p: 2.1, a: 0.18 },
-  { f: 12.6, p: 0.9, a: 0.1 },
-];
+let rumble = 0;
+let bright = 0;
 
 function cssAccent() {
   try {
@@ -82,37 +80,75 @@ function anyMediaPlaying() {
   return false;
 }
 
+/** Push fresh noise into the ring (scrolls left→right like live samples). */
+function advanceNoise(count) {
+  for (let i = 0; i < count; i++) {
+    // White-ish noise with mild correlation so it isn’t pure static snow
+    const white = Math.random() * 2 - 1;
+    const prev = noiseRing[(noiseWrite - 1 + BUF) % BUF] || 0;
+    noiseRing[noiseWrite % BUF] = prev * 0.35 + white * 0.65;
+    noiseWrite = (noiseWrite + 1) % BUF;
+  }
+}
+
+function readNoise(i) {
+  return noiseRing[(noiseWrite + i) % BUF];
+}
+
+/**
+ * Build a dense waveform: lots of zero-crossings across the width,
+ * shaped by a slow envelope — reads as audio, not an ECG blip.
+ */
 function synthesize(playing, dt) {
   targetEnergy = playing ? 1 : 0;
-  energy += (targetEnergy - energy) * Math.min(1, dt * 5);
-  if (energy < 0.015) {
+  energy += (targetEnergy - energy) * Math.min(1, dt * 7);
+  if (energy < 0.02) {
     wave.fill(0);
     return 0;
   }
 
-  phase += dt * (2.8 + energy * 3.5);
+  phase += dt * (18 + energy * 28);
+  // How many new “samples” to scroll in this frame
+  const scroll = Math.max(4, Math.floor(dt * 900 * (0.7 + energy)));
+  advanceNoise(scroll);
 
-  // Gentle frequency drift
-  for (let i = 0; i < partials.length; i++) {
-    const pr = partials[i];
-    pr.f += Math.sin(phase * 0.15 + i * 1.7) * dt * 0.15;
-    pr.f = Math.min(16, Math.max(1.2, pr.f));
-    pr.p += pr.f * dt * Math.PI * 2 * 0.85;
-  }
+  // Slow amplitude “music” motion
+  rumble += dt * 2.4;
+  bright += dt * 5.1;
+  const envSlow =
+    0.55 +
+    0.25 * Math.sin(rumble) +
+    0.2 * Math.sin(rumble * 0.37 + 1.1);
 
   let sumSq = 0;
   for (let i = 0; i < BUF; i++) {
     const t = i / (BUF - 1);
-    let s = 0;
-    for (const pr of partials) {
-      s += Math.sin(pr.p + t * Math.PI * 2 * pr.f) * pr.a;
-    }
-    // Light high-frequency shimmer (not hash static)
-    s += Math.sin(t * Math.PI * 40 + phase * 9) * 0.08 * energy;
-    s += Math.sin(t * Math.PI * 23 + phase * 5.5) * 0.06 * energy;
-    // Soft amplitude breathing so it isn't a flat ribbon
-    const env = 0.75 + 0.25 * Math.sin(t * Math.PI * 2 + phase * 0.6);
-    s = Math.tanh(s * 0.55) * env * energy;
+    const n0 = readNoise(i);
+    const n1 = readNoise((i * 3 + 17) % BUF);
+    const n2 = readNoise((i * 7 + 41) % BUF);
+
+    // Dense carriers — many cycles across the screen (this kills the heartbeat look)
+    const c1 = Math.sin(phase * 1.0 + t * Math.PI * 2 * 48);
+    const c2 = Math.sin(phase * 1.7 + t * Math.PI * 2 * 73);
+    const c3 = Math.sin(phase * 0.6 + t * Math.PI * 2 * 31);
+
+    // Local envelope so amplitude jumps along the trace
+    const localEnv =
+      0.4 +
+      0.6 * Math.abs(Math.sin(t * Math.PI * 6 + bright)) *
+        (0.5 + 0.5 * Math.sin(t * Math.PI * 13 + phase * 0.2));
+
+    let s =
+      n0 * 0.72 +
+      n1 * 0.28 +
+      n2 * 0.12 +
+      c1 * 0.18 +
+      c2 * 0.1 +
+      c3 * 0.08;
+
+    s *= localEnv * envSlow * energy;
+    // Soft clip like overloaded scope
+    s = Math.tanh(s * 1.6);
     wave[i] = s;
     sumSq += s * s;
   }
@@ -132,7 +168,7 @@ function drawFrame(now) {
 
   const tNow = now || performance.now();
   const playing = anyMediaPlaying();
-  if (!playing && energy < 0.02 && tNow - lastFrame < 50) {
+  if (!playing && energy < 0.025 && tNow - lastFrame < 48) {
     rafId = requestAnimationFrame(drawFrame);
     return;
   }
@@ -144,16 +180,16 @@ function drawFrame(now) {
   const midY = h * 0.5;
   const accent = cssAccent();
 
-  // Fade trail — mostly transparent so UI stays readable
   c2d.clearRect(0, 0, w, h);
 
   const rms = synthesize(playing, dt);
-  // Keep the wave in a slim center band (~12% of viewport height)
-  const band = h * 0.12;
-  const step = Math.max(1, Math.floor(BUF / Math.min(BUF, w)));
+  // Slim vertical band — detail comes from density, not height
+  const band = h * 0.1;
+  // Draw almost every sample so the line is fine and busy
+  const step = Math.max(1, Math.floor(BUF / Math.min(BUF, w * 1.25)));
 
-  if (energy > 0.02) {
-    const amp = 0.55 + rms * 0.9;
+  if (energy > 0.025) {
+    const amp = 0.75 + rms * 0.6;
 
     c2d.lineJoin = 'round';
     c2d.lineCap = 'round';
@@ -174,29 +210,20 @@ function drawFrame(now) {
       c2d.stroke();
     };
 
-    stroke(0.14 + energy * 0.1, Math.max(2, (w / 1100) * 3.5), 12);
-    stroke(0.4 + energy * 0.2, Math.max(1, (w / 1100) * 1.5), 3);
+    // Thin glow + thin core (not a fat hospital trace)
+    stroke(0.16 + energy * 0.12, Math.max(1.5, (w / 1400) * 2.5), 10);
+    stroke(0.5 + energy * 0.25, Math.max(0.9, (w / 1400) * 1.15), 2);
 
     c2d.shadowBlur = 0;
     c2d.globalAlpha = 1;
   } else {
-    // Faint idle hairline
     c2d.beginPath();
     c2d.strokeStyle = accent;
-    c2d.globalAlpha = 0.08;
-    c2d.lineWidth = Math.max(1, w / 1400);
-    c2d.shadowColor = accent;
-    c2d.shadowBlur = 4;
-    const t = tNow * 0.001;
-    const pts = 80;
-    for (let i = 0; i <= pts; i++) {
-      const x = (i / pts) * w;
-      const y = midY + Math.sin(i * 0.4 + t * 0.5) * (h * 0.004);
-      if (i === 0) c2d.moveTo(x, y);
-      else c2d.lineTo(x, y);
-    }
+    c2d.globalAlpha = 0.07;
+    c2d.lineWidth = 1;
+    c2d.moveTo(0, midY);
+    c2d.lineTo(w, midY);
     c2d.stroke();
-    c2d.shadowBlur = 0;
     c2d.globalAlpha = 1;
   }
 
@@ -219,7 +246,8 @@ export function startScope() {
 export function kickScopeFromPlayback() {
   startScope();
   targetEnergy = 1;
-  energy = Math.max(energy, 0.4);
+  energy = Math.max(energy, 0.55);
+  advanceNoise(80);
 }
 
 export function stopScopeLoop() {
