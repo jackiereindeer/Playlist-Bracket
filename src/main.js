@@ -32,6 +32,14 @@ import {
   formatYouTubeTime,
 } from './youtube-players.js';
 import { startPartyApp, parseRoomFromUrl } from './party/party-app.js';
+import {
+  ensurePreviewUrl,
+  clearPreviewCache,
+  dropEliminatedPreviews,
+  dropPreview,
+  prefetchMatchPreviews,
+  prefetchSongPreview,
+} from './preview-cache.js';
 
 const app = document.querySelector('#app');
 
@@ -67,11 +75,6 @@ let volumeBySide = { a: 0.25, b: 0.25 };
 /** Last volume the user set for each track id (0–1). */
 const volumeByTrackId = Object.create(null);
 
-/** Resolved preview URLs by track id. */
-const previewCache = Object.create(null);
-/** In-flight preview fetches so concurrent callers share one request. */
-const previewInflight = Object.create(null);
-
 let renderGeneration = 0;
 let loadGeneration = 0;
 
@@ -82,8 +85,6 @@ let transitionSongIndex = 0;
 const DEFAULT_MATCH_VOLUME = 0.25;
 const DEFAULT_TRANSITION_VOLUME = 0.1;
 const SAVE_DEBOUNCE_MS = 350;
-/** Only need a handful of preview URLs hot — not every song ever previewed. */
-const MAX_CACHED_PREVIEWS = 48;
 const MAX_TRACK_VOLUMES = 200;
 
 const STORAGE_KEY = 'playlist-bracket-save-v1';
@@ -399,34 +400,21 @@ function clearTransitionTimer() {
   }
 }
 
-function clearPreviewCache() {
-  for (const key of Object.keys(previewCache)) {
-    delete previewCache[key];
-  }
-  for (const key of Object.keys(previewInflight)) {
-    delete previewInflight[key];
-  }
-}
-
 /**
- * Drop preview URL cache entries for songs that already lost (and anything
- * beyond the max). Keeps memory flat during 100+ song brackets.
+ * Drop preview URL cache entries for songs that already lost.
+ * Keeps memory flat during 100+ song brackets.
  */
 function prunePreviewCache() {
-  if (state) {
-    const keep = new Set();
-    const m = currentMatch(state);
-    if (m?.a?.id) keep.add(m.a.id);
-    if (m?.b?.id) keep.add(m.b.id);
-    if (state.champion?.id) keep.add(state.champion.id);
-    const eliminated = eliminatedTrackIds(state);
-    for (const id of Object.keys(previewCache)) {
-      if (eliminated.has(id) && !keep.has(id)) {
-        delete previewCache[id];
-      }
-    }
+  if (!state) {
+    clearPreviewCache();
+    return;
   }
-  trimPreviewCache();
+  const keep = new Set();
+  const m = currentMatch(state);
+  if (m?.a?.id) keep.add(m.a.id);
+  if (m?.b?.id) keep.add(m.b.id);
+  if (state.champion?.id) keep.add(state.champion.id);
+  dropEliminatedPreviews(eliminatedTrackIds(state), keep);
 }
 
 /**
@@ -1029,6 +1017,13 @@ function scheduleMatchWinBeat(winnerSong, after) {
       volumeForTrack(winnerSong.id, DEFAULT_TRANSITION_VOLUME),
       gen
     );
+  }
+
+  // Free time: resolve next match (and optional wave stinger) while celebration plays
+  const nextMatch = currentMatch(state);
+  if (nextMatch) prefetchMatchPreviews(nextMatch);
+  if (after?.type === 'wave' && after.payload?.transitionSong) {
+    prefetchSongPreview(after.payload.transitionSong);
   }
 
   const ms = WIN_BEAT_MS;
@@ -1645,45 +1640,6 @@ function songCardHtml(song, side) {
   `;
 }
 
-function trimPreviewCache() {
-  const keys = Object.keys(previewCache);
-  if (keys.length <= MAX_CACHED_PREVIEWS) return;
-  for (const id of keys.slice(0, keys.length - MAX_CACHED_PREVIEWS)) {
-    delete previewCache[id];
-  }
-}
-
-async function ensurePreviewUrl(trackId) {
-  if (!trackId) return null;
-  if (previewCache[trackId]) return previewCache[trackId];
-  if (previewInflight[trackId]) return previewInflight[trackId];
-
-  previewInflight[trackId] = (async () => {
-    try {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          if (attempt > 0) {
-            await new Promise((r) => setTimeout(r, 400));
-          }
-          const res = await fetch(`/api/preview/${encodeURIComponent(trackId)}`);
-          const data = await res.json().catch(() => ({}));
-          if (res.ok && data.previewUrl) {
-            previewCache[trackId] = data.previewUrl;
-            trimPreviewCache();
-            return data.previewUrl;
-          }
-        } catch {
-        }
-      }
-      return null;
-    } finally {
-      delete previewInflight[trackId];
-    }
-  })();
-
-  return previewInflight[trackId];
-}
-
 function setSideVolume(side, volume01, trackId = null) {
   const vol = Math.min(1, Math.max(0, volume01));
   if (side === 'a' || side === 'b') volumeBySide[side] = vol;
@@ -1971,8 +1927,7 @@ function wireOnePlayer(side, song, volumeKey, gen, options = {}) {
           status.hidden = false;
           status.textContent = 'Loading preview…';
         }
-        delete previewCache[song.id];
-        delete previewInflight[song.id];
+        dropPreview(song.id);
         ensurePreviewUrl(song.id).then((retryUrl) => {
           if (!stillCurrent(gen, playBtn) || !stillCurrent(gen, audio)) return;
           if (!retryUrl) {

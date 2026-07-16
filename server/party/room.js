@@ -8,6 +8,7 @@ import {
   pickWinner,
   currentMatch,
   progress,
+  peekNextMatch,
 } from '../../src/tournament.js';
 import {
   COLORS,
@@ -116,8 +117,7 @@ export class Room {
     this.error = '';
     this.soloLike = false;
     this.abstentions = []; // public player chips for reveal
-    /** Chat kept server-side for memory cap only — late joiners do NOT receive history. */
-    this.chatLog = [];
+    // Chat is live-broadcast only — no server history (late joiners never get backlog).
   }
 
   /**
@@ -151,10 +151,6 @@ export class Room {
       pfp: p.pfp || null,
       text,
     };
-    this.chatLog.push(msg);
-    if (this.chatLog.length > 200) {
-      this.chatLog.splice(0, this.chatLog.length - 200);
-    }
     this.hub.sendToRoom(this, 'chat', { message: msg });
     return msg;
   }
@@ -284,6 +280,8 @@ export class Room {
             losers: this.winnerBeat.losers || [],
             winnerSide: this.winnerBeat.winnerSide,
             abstentions: this.winnerBeat.abstentions || this.abstentions || [],
+            // Clients prefetch these previews during the celebration beat
+            upcomingMatch: this.winnerBeat.upcomingMatch || null,
           }
         : null,
       champion: this.tournament?.champion
@@ -783,6 +781,21 @@ export class Room {
       reason: 'majority',
       needsHost: false,
     };
+    // Peek next match without advancing — clients load previews during celebration
+    let upcomingMatch = null;
+    try {
+      const peek = peekNextMatch(this.tournament, winnerSide);
+      if (peek?.a?.id && peek?.b?.id) {
+        upcomingMatch = {
+          a: slimSong(peek.a),
+          b: slimSong(peek.b),
+          region: peek.region || null,
+        };
+      }
+    } catch {
+      upcomingMatch = null;
+    }
+
     // Celebration: winner (large) + loser (small/grey) + voter chips with custom PFPs
     this.winnerBeat = {
       song: winnerSong,
@@ -791,6 +804,7 @@ export class Room {
       losers,
       winnerSide,
       abstentions: this.abstentions || [],
+      upcomingMatch,
     };
     this.phase = PHASE.WINNER;
     this.nowPlaying = {
@@ -1099,5 +1113,20 @@ export class Room {
 
   destroy() {
     this.clearVoteTimer();
+    // Drop heavy refs so GC can free playlist + tournament graphs
+    this.tournament = null;
+    this._rawTracks = null;
+    this.playlistMeta = null;
+    this.votes.clear();
+    this.reveal = null;
+    this.winnerBeat = null;
+    this.nowPlaying = null;
+    this.abstentions = [];
+    for (const p of this.players.values()) {
+      try {
+        p.ws = null;
+      } catch {
+      }
+    }
   }
 }

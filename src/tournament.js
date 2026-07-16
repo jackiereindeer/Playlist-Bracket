@@ -490,6 +490,19 @@ export function currentMatch(state) {
   return match;
 }
 
+/**
+ * Peek the next match *after* picking `side`, without mutating `state`.
+ * Used to prefetch previews during the winner celebration beat.
+ * @returns {{ a: object, b: object, region?: string }|null}
+ */
+export function peekNextMatch(state, side) {
+  if (!state || state.finished) return null;
+  if (side !== 'a' && side !== 'b') return null;
+  const next = pickWinner(state, side);
+  if (!next || next.finished) return null;
+  return currentMatch(next);
+}
+
 export function progress(state) {
   const totalMatchesThisWave = Array.isArray(state?.matches) ? state.matches.length : 0;
   const doneThisWave = state?.matchIndex || 0;

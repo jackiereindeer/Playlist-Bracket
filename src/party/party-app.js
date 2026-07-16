@@ -5,9 +5,15 @@
 import {
   prepareMediaElement,
   connectMediaElement,
+  disconnectMediaElement,
   resumeAudioContext,
   kickScopeFromPlayback,
 } from '../scope.js';
+import {
+  ensurePreviewUrl,
+  prefetchMatchPreviews,
+  prefetchSongPreview,
+} from '../preview-cache.js';
 import { buildPartyBracketHtml, wirePartyBracketTabs } from './party-bracket.js';
 
 /**
@@ -271,9 +277,19 @@ export function startPartyApp(root, opts) {
   let playSide = null; // which local/sync side is loaded
   let audioEl = null;
   let winnerPlaySongId = null;
-  let previewInflight = false;
+  /** @type {Set<string>} trackIds with in-flight playPreview (not the shared URL cache) */
+  let playInflight = new Set();
   let lastSyncedKey = null; // trackId+playing for sync dedupe
   let eqRaf = 0;
+  /** Bumps to cancel vote-timer setTimeout chains after re-render / destroy */
+  let uiEpoch = 0;
+  /** Bumps to ignore stale async playPreview completions */
+  let playGen = 0;
+  /** Abort join/create connect retry loops */
+  let connectEpoch = 0;
+  /** Bound once; removed on destroy */
+  let onPfpPaste = null;
+  let destroyed = false;
   let localVolume = 0.25;
   try {
     const v = Number(localStorage.getItem(VOL_KEY));
@@ -349,25 +365,54 @@ export function startPartyApp(root, opts) {
 
   function hardStopAudio() {
     stopEq();
-    if (!audioEl) return;
+    playInflight.clear();
+    playGen += 1; // abandon in-flight playPreview
+    if (!audioEl) {
+      playSide = null;
+      lastSyncedKey = null;
+      return;
+    }
     try {
       audioEl.pause();
+      audioEl.onended = null;
+      audioEl.onerror = null;
       audioEl.removeAttribute('src');
       delete audioEl.dataset.trackId;
       audioEl.load();
     } catch {
     }
     playSide = null;
-    previewInflight = false;
     lastSyncedKey = null;
   }
 
+  function disposePartyAudio() {
+    hardStopAudio();
+    if (!audioEl) return;
+    try {
+      disconnectMediaElement(audioEl);
+    } catch {
+    }
+    try {
+      audioEl.remove();
+    } catch {
+    }
+    audioEl = null;
+  }
+
   function ensureAudio() {
-    if (audioEl) return audioEl;
+    if (audioEl && audioEl.isConnected) return audioEl;
+    if (audioEl && !audioEl.isConnected) {
+      try {
+        disconnectMediaElement(audioEl);
+      } catch {
+      }
+      audioEl = null;
+    }
     audioEl = document.createElement('audio');
     audioEl.id = 'party-audio';
     audioEl.hidden = true;
     audioEl.setAttribute('playsinline', '');
+    audioEl.preload = 'none';
     document.body.appendChild(audioEl);
     return audioEl;
   }
@@ -407,10 +452,16 @@ export function startPartyApp(root, opts) {
     const ctx2d = canvas.getContext('2d');
     if (!ctx2d) return;
     const bars = 16;
+    const myEpoch = uiEpoch;
     const tick = () => {
-      if (!canvas.isConnected || audioEl.paused) {
+      if (destroyed || myEpoch !== uiEpoch || !canvas.isConnected) {
+        eqRaf = 0;
+        return;
+      }
+      if (!audioEl || audioEl.paused) {
         ctx2d.clearRect(0, 0, canvas.width, canvas.height);
-        eqRaf = requestAnimationFrame(tick);
+        // Stop spinning when paused — restart via playPreview/startEq
+        eqRaf = 0;
         return;
       }
       const w = canvas.width;
@@ -442,27 +493,35 @@ export function startPartyApp(root, opts) {
    * continuous=true keeps going if same track already playing (champion handoff).
    */
   async function playPreview(song, side, { quiet = false, continuous = false } = {}) {
-    if (!song?.id) return;
+    if (destroyed || !song?.id) return;
 
     if (continuous && audioEl?.src && !audioEl.paused && audioEl.dataset.trackId === song.id) {
       playSide = side;
       audioEl.volume = localVolume;
-      startEq(side === 'winner' || side === 'champion' ? side : side);
+      startEq(side);
       return;
     }
 
-    if (previewInflight && (side === 'win' || side === 'winner' || side === 'champion')) {
+    // Don't stack concurrent plays of celebration sides
+    if (
+      playInflight.has(song.id) &&
+      (side === 'win' || side === 'winner' || side === 'champion')
+    ) {
       return;
     }
 
-    previewInflight = true;
+    playInflight.add(song.id);
     const audio = ensureAudio();
+    const myPlay = ++playGen;
 
     try {
-      const res = await fetch(`/api/preview/${encodeURIComponent(song.id)}`);
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.previewUrl) {
-        previewInflight = false;
+      const previewUrl = await ensurePreviewUrl(song.id);
+      if (destroyed || myPlay !== playGen) {
+        playInflight.delete(song.id);
+        return;
+      }
+      if (!previewUrl) {
+        playInflight.delete(song.id);
         if (state?.you?.isHost && (side === 'a' || side === 'b')) {
           send('report_no_preview', { side });
         }
@@ -476,20 +535,23 @@ export function startPartyApp(root, opts) {
       prepareMediaElement(audio);
       // Avoid restarting same URL mid-play (champion continuity)
       if (!(continuous && audio.dataset.trackId === song.id && audio.src)) {
-        audio.src = data.previewUrl;
+        audio.src = previewUrl;
         audio.dataset.trackId = song.id;
       }
       connectMediaElement(audio);
       audio.volume = localVolume;
       await resumeAudioContext();
+      if (destroyed || myPlay !== playGen) {
+        playInflight.delete(song.id);
+        return;
+      }
       if (audio.paused) await audio.play();
       kickScopeFromPlayback();
       playSide = side;
       statusLine = '';
-      previewInflight = false;
+      playInflight.delete(song.id);
       startEq(side);
       if (!quiet && side !== 'winner' && side !== 'champion' && side !== 'win') {
-        // refresh play icons only
         root.querySelectorAll('.cover-play-btn').forEach((btn) => {
           const s = btn.getAttribute('data-play');
           btn.classList.toggle('is-playing', s === side);
@@ -498,8 +560,23 @@ export function startPartyApp(root, opts) {
         });
       }
     } catch {
-      previewInflight = false;
+      playInflight.delete(song.id);
       if (!quiet) statusLine = 'Could not play preview.';
+    }
+  }
+
+  /** When winner celebration starts, warm next match previews in the background. */
+  function prefetchUpcomingFromState(s) {
+    if (!s) return;
+    if (s.phase === 'winner' && s.winnerBeat?.upcomingMatch) {
+      prefetchMatchPreviews(s.winnerBeat.upcomingMatch);
+    }
+    // Current match (entering match phase or still there) — keep hot
+    if (s.phase === 'match' && s.match) {
+      prefetchMatchPreviews(s.match);
+    }
+    if (s.phase === 'champion' && s.champion) {
+      prefetchSongPreview(s.champion);
     }
   }
 
@@ -600,6 +677,8 @@ export function startPartyApp(root, opts) {
         ) {
           hardStopAudio();
         }
+        // Winner beat / match entry: fill preview cache while UI celebrates
+        prefetchUpcomingFromState(state);
         return;
       }
       if (msg.type === 'chat') {
@@ -706,8 +785,10 @@ export function startPartyApp(root, opts) {
     endedByHost = false;
     gateError = '';
     chatMessages = [];
+    const epoch = ++connectEpoch;
     connect();
     const tryCreate = () => {
+      if (destroyed || epoch !== connectEpoch) return;
       if (ws?.readyState === 1) {
         send('create', {
           displayName: form.displayName,
@@ -729,9 +810,11 @@ export function startPartyApp(root, opts) {
     endedByHost = false;
     gateError = '';
     chatMessages = []; // only messages after join (3B)
+    const epoch = ++connectEpoch;
     connect();
     const code = normalizeRoomCode(form.code);
     const tryJoin = () => {
+      if (destroyed || epoch !== connectEpoch) return;
       if (ws?.readyState === 1) {
         send('join', {
           code,
@@ -1313,10 +1396,9 @@ export function startPartyApp(root, opts) {
     // Paste image from clipboard on join/create (Ctrl+V) → opens cropper
     const pfpDrop = root.querySelector('#party-pfp-drop');
     if (pfpDrop) pfpDrop.tabIndex = 0;
-    if (!root._pfpPasteBound) {
-      root._pfpPasteBound = true;
-      document.addEventListener('paste', async (e) => {
-        if (screen !== 'gate') return;
+    if (!onPfpPaste) {
+      onPfpPaste = async (e) => {
+        if (destroyed || screen !== 'gate') return;
         if (cropper) return; // already cropping
         const items = e.clipboardData?.items;
         if (!items) return;
@@ -1339,7 +1421,8 @@ export function startPartyApp(root, opts) {
             break;
           }
         }
-      });
+      };
+      document.addEventListener('paste', onPfpPaste);
     }
 
     root.querySelector('#party-go')?.addEventListener('click', () => {
@@ -1919,8 +2002,10 @@ export function startPartyApp(root, opts) {
       // 30s top countdown after host votes (pulse under 10s)
       if (s.timerPhase === 'vote30' && s.voteDeadline && !s.paused) {
         const el = root.querySelector('#p-timer-display');
+        const epoch = uiEpoch;
         const tick = () => {
-          if (!el || !state || state.phase !== 'match') return;
+          if (destroyed || epoch !== uiEpoch) return;
+          if (!el || !el.isConnected || !state || state.phase !== 'match') return;
           if (state.timerPhase !== 'vote30' || !state.voteDeadline) {
             el.textContent = '';
             return;
@@ -1946,6 +2031,7 @@ export function startPartyApp(root, opts) {
     if (s.phase === 'winner' && s.winnerBeat) {
       root.querySelector('#p-skip-winner')?.addEventListener('click', () => send('skip_winner'));
       if (s.nowPlaying) applyNowPlaying(s.nowPlaying);
+      prefetchUpcomingFromState(s);
     }
   }
 
@@ -1971,6 +2057,9 @@ export function startPartyApp(root, opts) {
   window.addEventListener('keydown', onKey);
 
   function render() {
+    if (destroyed) return;
+    // Invalidate vote-timer chains and stale EQ loops for this paint
+    uiEpoch += 1;
     // Tear down cropper DOM if we're redrawing (rebuilt below if still open)
     document.getElementById('pfp-crop-overlay')?.remove();
     if (screen === 'gate') renderGate();
@@ -1982,14 +2071,26 @@ export function startPartyApp(root, opts) {
 
   return {
     destroy() {
+      destroyed = true;
+      uiEpoch += 1;
+      playGen += 1;
+      connectEpoch += 1;
       window.removeEventListener('keydown', onKey);
+      if (onPfpPaste) {
+        document.removeEventListener('paste', onPfpPaste);
+        onPfpPaste = null;
+      }
       document.getElementById('pfp-crop-overlay')?.remove();
       cropper = null;
-      hardStopAudio();
+      cropDrag = null;
+      chatMessages = [];
+      disposePartyAudio();
       try {
         ws?.close();
       } catch {
       }
+      ws = null;
+      state = null;
     },
   };
 }

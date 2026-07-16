@@ -168,6 +168,7 @@ function anyMediaPlaying() {
     'audio-champion',
     'audio-transition',
     'audio-champion-bed',
+    'party-audio',
   ]) {
     const el = document.getElementById(id);
     if (el && !el.paused && !el.ended) return true;

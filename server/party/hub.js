@@ -71,9 +71,14 @@ export function attachPartyHub(httpServer) {
     });
 
     ws.on('message', async (raw) => {
+      // Cap payload size (custom PFPs are already ~120KB max on the room side)
+      const rawStr = typeof raw === 'string' ? raw : String(raw);
+      if (rawStr.length > 250_000) {
+        return send(ws, 'error', { error: 'Message too large.' });
+      }
       let msg;
       try {
-        msg = JSON.parse(String(raw));
+        msg = JSON.parse(rawStr);
       } catch {
         return send(ws, 'error', { error: 'Bad message.' });
       }

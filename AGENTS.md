@@ -51,8 +51,8 @@ March Madness–style **1v1 song tournament** from a **public** Spotify or YouTu
 | Live | https://playlist-bracket.onrender.com/ |
 | GitHub | https://github.com/jackiereindeer/Playlist-Bracket |
 | Auto-deploy | Push to `main` updates live |
-| Live content | **Solo only** until braej ships party |
-| Before party push | Share link + **custom PFPs** + checklist in AI-Context project note |
+| Live content | **Party shipped** (rooms, share links, PFPs, chat) as of `374ba98` |
+| Party deploy | Pushed to `main` 2026-07-16; free tier cold starts expected |
 
 ---
 
@@ -120,7 +120,8 @@ Vite proxies `/api/*` and WebSocket `/party` → `http://localhost:3001` / `ws:/
 4. **YouTube playlists:** require `YOUTUBE_API_KEY` (or `YT_API_KEY`) server-side. Cap is intentional (`MAX_ITEMS` in `youtube-public.js`).
 5. **Electron must import `startServer()`** from `server/index.js` (not double-listen). Server only auto-listens when run as `node server/index.js` and not `PLAYLIST_BRACKET_MANAGED=1`.
 6. **Audio is delicate.** Match players, transition stingers, and champion bed are separate concerns. Don’t “fix” audio by nuking all media indiscriminately — preserve champion bed across results UI when that’s the intended behavior. Respect fade helpers and `renderGeneration` / `loadGeneration` guards against race conditions.
-7. **Long brackets (100+ songs):** Reuse body-level pool `<audio>` via `getPoolAudio` — do **not** put a fresh `<audio id="audio-a">` inside each match card. Creating new elements every match leaks `MediaElementSource` nodes and causes late-game lag. Prune `previewCache` for eliminated tracks; keep `MAX_CACHED_PREVIEWS` small.
+7. **Long brackets (100+ songs):** Reuse body-level pool `<audio>` via `getPoolAudio` — do **not** put a fresh `<audio id="audio-a">` inside each match card. Creating new elements every match leaks `MediaElementSource` nodes and causes late-game lag. Shared `src/preview-cache.js` caps cached preview URLs; prune eliminated tracks. During winner beats, **prefetch** the next match’s preview URLs + art (solo + party).
+8. **Party cleanup:** `partyHandle.destroy()` must remove the document paste listener, dispose `#party-audio` (disconnect MediaElementSource + remove node), cancel EQ/timer epochs, and close the WebSocket.
 7. **Save format:** `localStorage` key `playlist-bracket-save-v1`. Validate with `isSongLike` / deserialize guards; corrupt saves fall back to setup, never crash the whole app.
 8. **Secrets:** never commit `.env`, never put API keys in client bundles, don’t distribute portable exes that embed personal keys without warning the user.
 
