@@ -22,8 +22,51 @@ const isProd = process.env.NODE_ENV === 'production';
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Render (and similar hosts) sit in front of Node as a reverse proxy.
+// trust proxy makes req.ip use X-Forwarded-For so we see the visitor, not Render.
+app.set('trust proxy', 1);
+
 app.use(cors());
 app.use(express.json({ limit: '32kb' }));
+
+/**
+ * Best-effort real visitor IP.
+ * On Render, the browser → Render edge → your app, so the direct connection
+ * is often a proxy. The original client is usually first in X-Forwarded-For.
+ */
+function clientIp(req) {
+  const xf = req.headers['x-forwarded-for'];
+  if (typeof xf === 'string' && xf.trim()) {
+    return xf.split(',')[0].trim();
+  }
+  if (Array.isArray(xf) && xf[0]) {
+    return String(xf[0]).split(',')[0].trim();
+  }
+  return req.ip || req.socket?.remoteAddress || 'unknown';
+}
+
+/** Paths we never log (health pings, etc.). */
+const SKIP_VISIT_LOG = new Set(['/api/health']);
+
+/** Static file extensions — logging every JS/CSS chunk would flood the logs. */
+const STATIC_EXT =
+  /\.(js|css|map|svg|png|jpe?g|gif|webp|ico|woff2?|ttf|eot|mp3|mp4|webm)$/i;
+
+/**
+ * Option B visitor log: prints IP + method + path to stdout.
+ * On Render → Dashboard → your service → Logs, search for "[visit]".
+ * Does not store IPs in a database; lines age out with Render log retention.
+ */
+app.use((req, res, next) => {
+  const pathOnly = req.path || '/';
+  if (SKIP_VISIT_LOG.has(pathOnly) || STATIC_EXT.test(pathOnly)) {
+    return next();
+  }
+  console.log(
+    `[visit] ${new Date().toISOString()} ip=${clientIp(req)} ${req.method} ${pathOnly}`
+  );
+  next();
+});
 
 app.get('/api/health', (_req, res) => {
   res.json({
@@ -130,6 +173,33 @@ app.get('*', (req, res, next) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+/**
+ * Start the HTTP server. Used by CLI (`npm start`) and the Electron shell.
+ * @param {{ port?: number|string, host?: string }} [opts]
+ * @returns {Promise<{ server: import('http').Server, port: number, host: string }>}
+ */
+export function startServer(opts = {}) {
+  const port = Number(opts.port || process.env.PORT || PORT) || 3001;
+  const host = opts.host || process.env.HOST || '127.0.0.1';
+
+  return new Promise((resolve, reject) => {
+    const server = app.listen(port, host, () => {
+      console.log(`Server running on http://${host}:${port}`);
+      resolve({ server, port, host });
+    });
+    server.on('error', reject);
+  });
+}
+
+// Auto-listen when run as `node server/index.js` (not when Electron imports us)
+const isElectronManaged = process.env.PLAYLIST_BRACKET_MANAGED === '1';
+const isDirectRun =
+  process.argv[1] &&
+  path.resolve(process.argv[1]).replace(/\\/g, '/').endsWith('/server/index.js');
+
+if (!isElectronManaged && isDirectRun) {
+  startServer().catch((err) => {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  });
+}
