@@ -824,6 +824,11 @@ export function startPartyApp(root, opts) {
           lastSyncedKey = null;
         } else if (
           prevPhase === 'rate_song' &&
+          state?.phase === 'rate_reveal'
+        ) {
+          // Keep current song bed into the score reveal beat
+        } else if (
+          (prevPhase === 'rate_song' || prevPhase === 'rate_reveal') &&
           (state?.phase === 'rate_results' || state?.phase === 'lobby')
         ) {
           hardStopAudio();
@@ -832,6 +837,13 @@ export function startPartyApp(root, opts) {
           prevPhase === 'rate_results' &&
           state?.phase === 'lobby'
         ) {
+          hardStopAudio();
+          lastSyncedKey = null;
+        } else if (
+          prevPhase === 'rate_reveal' &&
+          state?.phase === 'rate_song'
+        ) {
+          // Next song after reveal — stop previous preview
           hardStopAudio();
           lastSyncedKey = null;
         } else if (
@@ -1737,6 +1749,14 @@ export function startPartyApp(root, opts) {
       return;
     }
 
+    // Group Rate between-song reveal — song + who rated what + average
+    if (s.phase === 'rate_reveal' && s.groupRate?.reveal?.song) {
+      root.innerHTML = wrapWithChat(renderGroupRateReveal(s, isHost));
+      wireLive(s, isHost);
+      wireChat();
+      return;
+    }
+
     const players = s.players || [];
     const roster = players
       .map((p) => {
@@ -1751,6 +1771,8 @@ export function startPartyApp(root, opts) {
       body = renderChampionResults(s, isHost);
     } else if (s.phase === 'rate_song') {
       body = renderGroupRateSong(s, isHost);
+    } else if (s.phase === 'rate_reveal') {
+      body = renderGroupRateReveal(s, isHost);
     } else if (s.phase === 'rate_results') {
       body = renderGroupRateResults(s, isHost);
     } else if (s.phase === 'lobby') {
@@ -1802,6 +1824,81 @@ export function startPartyApp(root, opts) {
     root.innerHTML = wrapWithChat(main);
     wireLive(s, isHost);
     wireChat();
+  }
+
+  /**
+   * Full-screen Group Rate song reveal (like bracket winner beat):
+   * song art/title, each player's score, group average, then next song / results.
+   */
+  function renderGroupRateReveal(s, isHost) {
+    const gr = s.groupRate || {};
+    const rev = gr.reveal || {};
+    const song = rev.song || gr.song;
+    const scores = Array.isArray(rev.scores) ? rev.scores : [];
+    const average =
+      rev.average != null && Number.isFinite(Number(rev.average))
+        ? Number(rev.average)
+        : null;
+    const songNumber = rev.songNumber || (gr.index != null ? gr.index + 1 : 1);
+    const total = rev.total || gr.total || scores.length || 0;
+    const isLast = Boolean(rev.isLast);
+    const nextLabel = isLast
+      ? 'Final rankings in a moment…'
+      : 'Next song in a moment…';
+
+    const art = song?.image
+      ? `<img src="${esc(song.image)}" alt="" class="party-win-art-full" />`
+      : `<div class="party-win-art-full party-win-art-fallback" aria-hidden="true">🎵</div>`;
+
+    const rows = scores
+      .map((row) => {
+        const face = row.pfp
+          ? `<img class="party-chip-pfp" src="${esc(row.pfp)}" alt="" />`
+          : `<span class="party-chip-emoji">${esc(avatarEmoji(row.avatar, avatars))}</span>`;
+        const hex = colorHex(row.color, colors);
+        return `
+          <div class="party-gr-reveal-row">
+            <div class="party-gr-reveal-who">
+              ${face}
+              <span class="party-gr-reveal-name" style="--chip:${esc(hex)}">${esc(row.displayName || 'Player')}</span>
+            </div>
+            <span class="party-gr-reveal-score">${esc(formatRateScore(row.score))}</span>
+          </div>`;
+      })
+      .join('');
+
+    const avgHtml =
+      average != null
+        ? `<div class="party-gr-reveal-avg">
+            <span class="party-gr-reveal-avg-label">Group average</span>
+            <span class="party-gr-reveal-avg-num">${esc(formatRateScore(average))}</span>
+          </div>`
+        : '';
+
+    return `
+      <div class="party-winner-full party-gr-reveal-full">
+        <div class="party-winner-full-inner party-gr-reveal-inner">
+          <p class="party-winner-label">Song rated · ${esc(String(songNumber))}/${esc(String(total))}</p>
+          <div class="party-win-art-stage">
+            ${art}
+          </div>
+          <h1 class="party-winner-title">${esc(song?.name || '')}</h1>
+          <p class="party-winner-artists">${esc(song?.artists || '')}</p>
+          ${avgHtml}
+          <div class="party-gr-reveal-list">
+            ${rows || '<p class="muted small">No ratings locked in</p>'}
+          </div>
+          <p class="muted small">${esc(nextLabel)}</p>
+          ${
+            isHost
+              ? `<button type="button" class="ghost" id="p-skip-rate-reveal">${
+                  isLast ? 'Skip · final results' : 'Skip · next song'
+                }</button>`
+              : ''
+          }
+        </div>
+      </div>
+    `;
   }
 
   /** Big full-viewport winner art + who voted for it. */
@@ -3112,6 +3209,13 @@ export function startPartyApp(root, opts) {
       root.querySelector('#p-skip-winner')?.addEventListener('click', () => send('skip_winner'));
       if (s.nowPlaying) applyNowPlaying(s.nowPlaying);
       prefetchUpcomingFromState(s);
+    }
+
+    if (s.phase === 'rate_reveal') {
+      root.querySelector('#p-skip-rate-reveal')?.addEventListener('click', () =>
+        send('skip_rate_reveal')
+      );
+      if (s.nowPlaying) applyNowPlaying(s.nowPlaying);
     }
   }
 

@@ -51,6 +51,8 @@ export const PHASE = {
   CHAMPION: 'champion',
   /** Group Rate: everyone rates the current song */
   RATE_SONG: 'rate_song',
+  /** Group Rate: short reveal of scores + average before next song (like bracket winner beat) */
+  RATE_REVEAL: 'rate_reveal',
   /** Group Rate: ranked results until everyone hits Continue */
   RATE_RESULTS: 'rate_results',
 };

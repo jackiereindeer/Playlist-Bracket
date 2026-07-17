@@ -4169,6 +4169,89 @@ body[data-stage='quarters'] .vs-badge {
   min-height: auto;
 }
 /* Winner screen + chat: main col can be full-bleed under fixed winner */
+/* Group Rate between-song reveal (scores + average) */
+.party-gr-reveal-inner {
+  max-width: min(520px, 96vw);
+}
+.party-gr-reveal-avg {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  margin: 0.75rem 0 1rem;
+  padding: 0.65rem 1.25rem;
+  border-radius: 1rem;
+  background: color-mix(in srgb, var(--accent, #1ed760) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #1ed760) 45%, transparent);
+}
+.party-gr-reveal-avg-label {
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted, #9b94ad);
+  font-weight: 700;
+}
+.party-gr-reveal-avg-num {
+  font-size: clamp(2rem, 6vw, 2.75rem);
+  font-weight: 800;
+  line-height: 1;
+  color: var(--text, #f7f4ff);
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
+}
+.party-gr-reveal-list {
+  width: min(100%, 380px);
+  max-height: min(40vh, 280px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin: 0 auto 1rem;
+  padding: 0.35rem 0.15rem;
+  text-align: left;
+}
+.party-gr-reveal-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--surface, #16141c) 88%, #000);
+  border: 1px solid color-mix(in srgb, var(--muted, #9b94ad) 22%, transparent);
+}
+.party-gr-reveal-who {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.party-gr-reveal-who .party-chip-pfp,
+.party-gr-reveal-who .party-chip-emoji {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  font-size: 1rem;
+}
+.party-gr-reveal-name {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--chip, var(--text, #f7f4ff));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.party-gr-reveal-score {
+  font-weight: 800;
+  font-size: 1.15rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text, #f7f4ff);
+  flex-shrink: 0;
+}
+
 .party-with-chat .party-winner-full {
   position: relative;
   inset: auto;

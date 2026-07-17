@@ -122,6 +122,22 @@ export class Room {
     this.rateArchive = [];
     /** @type {Set<string>} players who pressed Continue on results */
     this.rateReadyNext = new Set();
+    /**
+     * Between songs: show who rated what + average (like bracket winnerBeat).
+     * @type {null | {
+     *   song: object,
+     *   scores: object[],
+     *   average: number,
+     *   count: number,
+     *   songNumber: number,
+     *   total: number,
+     *   isLast: boolean,
+     *   nextSong: object|null
+     * }}
+     */
+    this.rateReveal = null;
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    this._rateRevealTimer = null;
     /** Lobby “I’m ready” chips (optional; cleared on start) */
     this.lobbyReadyIds = new Set();
     /** @type {Map<string, object>} */
@@ -432,7 +448,7 @@ export class Room {
       const err = new Error(
         this.phase === PHASE.CHAMPION || this.phase === PHASE.RATE_RESULTS
           ? 'Session finished — wait for everyone to continue to a new lobby.'
-          : this.phase === PHASE.RATE_SONG
+          : this.phase === PHASE.RATE_SONG || this.phase === PHASE.RATE_REVEAL
             ? 'Group Rate already started — no late join. Wait for the next lobby.'
             : 'Game already started — wait for the next lobby after this tournament.'
       );
@@ -484,12 +500,17 @@ export class Room {
 
     // Group Rate: DC = out for the rest of this run (unlucky). Drop seat so no rejoin mid-game.
     // Keep a lock-in already submitted for the current song (name snapshotted at lock).
-    if (this.phase === PHASE.RATE_SONG || this.phase === PHASE.RATE_RESULTS) {
+    if (
+      this.phase === PHASE.RATE_SONG ||
+      this.phase === PHASE.RATE_REVEAL ||
+      this.phase === PHASE.RATE_RESULTS
+    ) {
       this.rateRaterIds.delete(playerId);
       this.rateReadyNext.delete(playerId);
       this.players.delete(playerId);
       if (this.phase === PHASE.RATE_SONG) this.maybeAdvanceGroupRate();
-      else this.maybeFinishResultsReady();
+      else if (this.phase === PHASE.RATE_RESULTS) this.maybeFinishResultsReady();
+      // rate_reveal: keep celebrating; DC only drops seat
       this.broadcast();
       return;
     }
@@ -508,12 +529,21 @@ export class Room {
   }
 
   clearGroupRateState() {
+    this.clearRateRevealTimer();
     this.rateTracks = null;
     this.rateIndex = 0;
     this.rateRaterIds = new Set();
     this.rateSongScores = new Map();
     this.rateArchive = [];
     this.rateReadyNext = new Set();
+    this.rateReveal = null;
+  }
+
+  clearRateRevealTimer() {
+    if (this._rateRevealTimer) {
+      clearTimeout(this._rateRevealTimer);
+      this._rateRevealTimer = null;
+    }
   }
 
   /** Toggle “I’m ready” in lobby (cosmetic coordination for host). */
@@ -656,6 +686,8 @@ export class Room {
     this.rateSongScores = new Map();
     this.rateArchive = [];
     this.rateReadyNext = new Set();
+    this.rateReveal = null;
+    this.clearRateRevealTimer();
     this.phase = PHASE.RATE_SONG;
     this.broadcast();
   }
@@ -717,9 +749,9 @@ export class Room {
       // Everyone left — finish current song if any scores, then results or lobby
       if (this.rateSongScores.size > 0 || this.rateArchive.length > 0) {
         if (this.rateIndex < this.rateTracks.length) {
-          this.finalizeCurrentRateSong();
+          this.beginRateReveal();
+          return;
         }
-        // Flush remaining unrated songs? No — only songs that were completed.
         this.phase = PHASE.RATE_RESULTS;
         this.rateReadyNext = new Set();
       } else {
@@ -730,15 +762,117 @@ export class Room {
     for (const id of need) {
       if (!this.rateSongScores.has(id)) return;
     }
-    this.finalizeCurrentRateSong();
-    if (this.rateIndex >= this.rateTracks.length) {
-      this.phase = PHASE.RATE_RESULTS;
-      this.rateReadyNext = new Set();
-    }
-    // else: next song — scores map already cleared in finalize
+    // All active raters locked in → celebration beat, then next song / results
+    this.beginRateReveal();
   }
 
+  /**
+   * Archive current song, open rate_reveal phase (who rated what + average).
+   * Auto-advances after ~4.5s (host can skip), same cadence as bracket winnerBeat.
+   */
+  beginRateReveal() {
+    if (this.phase !== PHASE.RATE_SONG || !this.rateTracks?.length) return;
+    const song = this.rateTracks[this.rateIndex];
+    if (!song) {
+      this.rateIndex = this.rateTracks.length;
+      this.phase = PHASE.RATE_RESULTS;
+      this.rateReadyNext = new Set();
+      return;
+    }
+
+    const scoreList = [];
+    const scoresMap = {};
+    for (const [pid, entry] of this.rateSongScores) {
+      const score = this.rateScoreValue(entry);
+      if (score == null) continue;
+      const p = this.players.get(pid);
+      const snap = typeof entry === 'object' && entry ? entry : null;
+      const row = {
+        playerId: pid,
+        displayName: p?.displayName || snap?.displayName || 'Player',
+        color: p?.color || snap?.color || 'slate',
+        avatar: p?.avatar || snap?.avatar || 'frog',
+        pfp: p?.pfp || snap?.pfp || null,
+        score,
+      };
+      scoreList.push(row);
+      scoresMap[pid] = row;
+    }
+
+    // Highest first, then name for stable ties
+    scoreList.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return String(a.displayName).localeCompare(String(b.displayName));
+    });
+
+    const vals = scoreList.map((s) => s.score);
+    const avg =
+      vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+    const average = Math.round(avg * 10) / 10;
+    const songNumber = this.rateIndex + 1;
+    const total = this.rateTracks.length;
+
+    if (Object.keys(scoresMap).length > 0) {
+      this.rateArchive.push({ song: slimSong(song), scores: scoresMap });
+    }
+
+    this.rateSongScores = new Map();
+    this.rateIndex += 1;
+    const isLast = this.rateIndex >= total;
+    const nextSong = !isLast ? slimSong(this.rateTracks[this.rateIndex]) : null;
+
+    this.rateReveal = {
+      song: slimSong(song),
+      scores: scoreList,
+      average,
+      count: vals.length,
+      songNumber,
+      total,
+      isLast,
+      nextSong,
+    };
+    this.phase = PHASE.RATE_REVEAL;
+    this.nowPlaying = {
+      side: 'rate_reveal',
+      trackId: song.id,
+      song: slimSong(song),
+      playing: true,
+    };
+
+    this.clearRateRevealTimer();
+    this._rateRevealTimer = setTimeout(() => {
+      this._rateRevealTimer = null;
+      if (this.phase !== PHASE.RATE_REVEAL) return;
+      this.finishRateReveal();
+    }, 4500);
+  }
+
+  finishRateReveal() {
+    this.clearRateRevealTimer();
+    if (this.phase !== PHASE.RATE_REVEAL) return;
+    this.rateReveal = null;
+    if (this.rateIndex >= (this.rateTracks?.length || 0)) {
+      this.phase = PHASE.RATE_RESULTS;
+      this.rateReadyNext = new Set();
+      this.nowPlaying = null;
+    } else {
+      this.phase = PHASE.RATE_SONG;
+      // Soft handoff: stop celebration nowPlaying so next song is local/manual
+      this.nowPlaying = null;
+    }
+    this.broadcast();
+  }
+
+  /** Host skip on the between-song rating reveal (like skip_winner). */
+  skipRateReveal(playerId) {
+    this.assertHost(playerId);
+    if (this.phase !== PHASE.RATE_REVEAL) return;
+    this.finishRateReveal();
+  }
+
+  /** @deprecated path — kept if anything still calls finalize; prefer beginRateReveal */
   finalizeCurrentRateSong() {
+    // Legacy: archive without reveal (should not be used mid-session now)
     const song = this.rateTracks?.[this.rateIndex];
     if (!song) {
       this.rateIndex = this.rateTracks?.length || 0;
@@ -759,7 +893,6 @@ export class Room {
         score,
       };
     }
-    // Only archive if at least one lock-in (empty song shouldn't rank)
     if (Object.keys(scores).length > 0) {
       this.rateArchive.push({ song: slimSong(song), scores });
     }
@@ -869,6 +1002,7 @@ export class Room {
   publicGroupRate(forPlayerId) {
     if (
       this.phase !== PHASE.RATE_SONG &&
+      this.phase !== PHASE.RATE_REVEAL &&
       this.phase !== PHASE.RATE_RESULTS
     ) {
       return null;
@@ -895,6 +1029,33 @@ export class Room {
         myRating,
         iAmRater,
         canRate: iAmRater && Boolean(me?.connected),
+        reveal: null,
+      };
+    }
+
+    if (this.phase === PHASE.RATE_REVEAL) {
+      const rev = this.rateReveal;
+      return {
+        index: Math.max(0, (rev?.songNumber || 1) - 1),
+        total: rev?.total || this.rateTracks?.length || 0,
+        song: rev?.song || null,
+        ratedCount: rev?.count || 0,
+        raterCount: rev?.count || 0,
+        myRating: null,
+        iAmRater,
+        canRate: false,
+        reveal: rev
+          ? {
+              song: rev.song,
+              scores: rev.scores || [],
+              average: rev.average,
+              count: rev.count,
+              songNumber: rev.songNumber,
+              total: rev.total,
+              isLast: Boolean(rev.isLast),
+              nextSong: rev.nextSong || null,
+            }
+          : null,
       };
     }
 
@@ -913,6 +1074,7 @@ export class Room {
       myRating: null,
       iAmRater,
       canRate: false,
+      reveal: null,
       ranking,
       playlistName: this.playlistMeta?.name || 'Group Rate',
       playlistOwner: this.playlistMeta?.owner || '',

@@ -236,6 +236,9 @@ async function handle(ws, ctx, msg, type, rooms, hub) {
     case 'skip_winner':
       room.skipWinner(pid);
       break;
+    case 'skip_rate_reveal':
+      room.skipRateReveal(pid);
+      break;
     case 'new_lobby':
       room.newLobby(pid);
       break;
