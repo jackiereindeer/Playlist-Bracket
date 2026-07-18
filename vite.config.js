@@ -13,6 +13,13 @@ export default defineConfig({
         target: 'ws://localhost:3001',
         ws: true,
         changeOrigin: true,
+        // Tab refresh / HMR aborts sockets; don't treat as fatal
+        configure: (proxy) => {
+          proxy.on('error', () => {});
+          proxy.on('proxyReqWs', (_proxyReq, _req, socket) => {
+            socket.on('error', () => {});
+          });
+        },
       },
     },
   },

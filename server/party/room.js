@@ -408,6 +408,11 @@ export class Room {
     this.hub.broadcast(this);
   }
 
+  /**
+   * Claim / rejoin a seat. Same sessionToken ALWAYS reuses one seat — never clones.
+   * (Multi-tab testing uses a different token per tab via sessionStorage.)
+   * Returns the player record; hub must set player.ws after this returns.
+   */
   addPlayer({ displayName, color, avatar, pfp, sessionToken, preferHost }) {
     this.touch();
     let resumeToken = sessionToken || null;
@@ -419,31 +424,34 @@ export class Room {
       throw err;
     }
 
-    // Rejoin by session token — only if that seat is free (not already online).
-    // If the token is already connected (another tab), mint a NEW player instead
-    // of hijacking the live seat (that bug made rooms look capped at 1–2).
+    // Same session token → same person. Always reclaim the seat.
+    // Old bug: if the seat looked "already live", we minted a NEW player with the
+    // same name/PFP. That filled rooms with clones of the host (or anyone) whenever
+    // join ran twice on a still-open seat (double message, proxy blip, take-over race).
     if (resumeToken) {
       for (const p of this.players.values()) {
         if (p.sessionToken === resumeToken && !p.banned) {
-          const alreadyLive =
-            p.connected && p.ws && p.ws.readyState === 1; /* WebSocket.OPEN */
-          if (alreadyLive) {
-            resumeToken = null;
-            break;
-          }
+          const oldWs = p.ws;
           p.connected = true;
-          p.ws = null; // set by hub
+          p.ws = null; // hub attaches the new socket next
           if (displayName) p.displayName = safeName(displayName);
           if (colorOk(color)) p.color = color;
           if (avatarOk(avatar)) p.avatar = avatar;
           p.pfp = safePfp;
+          // Drop a stale open socket so it can't keep the old seat "live"
+          if (oldWs && oldWs.readyState === 1) {
+            try {
+              oldWs.close(4000, 'seat_taken_over');
+            } catch {
+            }
+          }
           return p;
         }
       }
     }
 
     // New players only in open lobby. Mid Group Rate: no new raters (design).
-    // (Existing seats still rejoin above via session token — only if still connected slot free.)
+    // (Existing seats still rejoin above via session token.)
     if (this.phase !== PHASE.LOBBY) {
       const err = new Error(
         this.phase === PHASE.CHAMPION || this.phase === PHASE.RATE_RESULTS
@@ -486,9 +494,18 @@ export class Room {
     return player;
   }
 
-  setDisconnected(playerId) {
+  /**
+   * Mark a seat offline. `fromWs` is the socket that closed — if the seat already
+   * moved to a newer socket, ignore this close (prevents reconnect take-over races
+   * from wiping the live seat or leaving ghost clones).
+   */
+  setDisconnected(playerId, fromWs = null) {
     const p = this.players.get(playerId);
     if (!p) return;
+    // Seat already attached to a different live socket → this close is stale
+    if (fromWs && p.ws && p.ws !== fromWs) {
+      return;
+    }
     p.connected = false;
     p.ws = null;
     this.touch();

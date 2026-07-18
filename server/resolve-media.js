@@ -4,8 +4,10 @@
  */
 import {
   extractPlaylistId,
+  extractAlbumId,
   extractTrackId,
   fetchPublicPlaylist,
+  fetchPublicAlbum,
   fetchPublicTrack,
 } from './spotify-public.js';
 import {
@@ -125,6 +127,30 @@ export async function resolveMediaUrl(rawUrl) {
     };
   }
 
+  // --- Spotify album (same multi-track shape as a playlist for all modes) ---
+  const albumId = extractAlbumId(raw);
+  if (albumId) {
+    const album = await fetchPublicAlbum(albumId);
+    const tracks = (album.tracks || [])
+      .map((t) => normalizeTrack({ ...t, source: t.source || 'spotify' }))
+      .filter(Boolean);
+    if (!tracks.length) {
+      const err = new Error('No playable songs on that Spotify album.');
+      err.status = 400;
+      throw err;
+    }
+    return {
+      kind: 'playlist', // clients already treat multi-track imports as "playlist"
+      name: album.name || 'Album',
+      source: 'spotify',
+      tracks,
+      image: album.image || null,
+      id: album.id,
+      owner: album.owner || '',
+      mediaKind: 'album',
+    };
+  }
+
   // --- Spotify playlist ---
   const playlistId = extractPlaylistId(raw);
   if (playlistId) {
@@ -163,7 +189,7 @@ export async function resolveMediaUrl(rawUrl) {
   }
 
   const err = new Error(
-    'Unrecognized link. Paste a Spotify or YouTube song or playlist URL.'
+    'Unrecognized link. Paste a Spotify or YouTube song, playlist, or Spotify album URL.'
   );
   err.status = 400;
   err.code = 'BAD_URL';

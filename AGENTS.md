@@ -65,7 +65,7 @@ March Madness–style **1v1 song tournament** + **solo Rating Mode** + **party m
 | GitHub | https://github.com/jackiereindeer/Playlist-Bracket |
 | Auto-deploy | Push to `main` updates live |
 | Live content | **Full app**: solo, rating, party bracket, Group Rate, export, etc. |
-| Last handoff commit | `96d05b1` (results-meta-toggle off-state: dim, no purple strike) |
+| Last handoff commit | `cb819df` — Group Rate between-song reveal (scores + average); verified live |
 | Free tier | Cold starts expected |
 
 ---
@@ -134,6 +134,7 @@ Vite proxies `/api/*` and WebSocket `/party` → `http://localhost:3001` / `ws:/
 1. **Keep vanilla JS.** No framework migration unless the user explicitly asks.
 2. **Server owns external playlist loading.** Frontend calls `GET /api/playlist?url=…` (and related preview/import routes). Don’t scrape Spotify/YouTube from the browser for playlist bulk data.
 3. **Spotify playlists:** public, no user OAuth. Implementation is anonymous/public session + Pathfinder GraphQL with pagination (`PAGE_SIZE` 100). Hash may rot — update `FETCH_PLAYLIST_HASH` / fallbacks in `spotify-public.js` carefully. Official Web API developer credentials in `.env` are **legacy/optional**, not required for the current public path (see README).
+3b. **Spotify albums:** same public path — `extractAlbumId` + `fetchPublicAlbum` (embed page) in `spotify-public.js`. Wired through `/api/playlist`, `/api/import`, and `resolveMediaUrl` so solo, rating, and party all accept album links like playlists. Bare 22-char ids stay playlist-first (ambiguous); albums need `/album/` URL or `spotify:album:`.
 4. **YouTube playlists:** require `YOUTUBE_API_KEY` (or `YT_API_KEY`) server-side. Cap is intentional (`MAX_ITEMS` in `youtube-public.js`). Quota ~10k/day — no bulk key rotation.
 5. **Electron must import `startServer()`** from `server/index.js` (not double-listen). Server only auto-listens when run as `node server/index.js` and not `PLAYLIST_BRACKET_MANAGED=1`.
 6. **Audio is delicate.** Match players, transition stingers, and champion bed are separate concerns. Don’t “fix” audio by nuking all media indiscriminately — preserve champion bed across results UI when that’s the intended behavior. Respect fade helpers and `renderGeneration` / `loadGeneration` guards against race conditions. Group Rate: soft HUD — re-renders must not kill audio.

@@ -91,12 +91,15 @@ export function attachPartyHub(httpServer) {
 
     ws.on('close', () => {
       if (ctx.room && ctx.playerId) {
-        ctx.room.setDisconnected(ctx.playerId);
+        // Pass this socket so a seat take-over isn't wiped by the old close
+        ctx.room.setDisconnected(ctx.playerId, ws);
         if (ctx.room.players.size === 0) {
           ctx.room.destroy();
           rooms.delete(ctx.room.code);
         }
       }
+      ctx.room = null;
+      ctx.playerId = null;
     });
   });
 
@@ -104,8 +107,42 @@ export function attachPartyHub(httpServer) {
   return { wss, rooms };
 }
 
+/**
+ * Attach this socket to a player seat. Clears any other seats that still point
+ * at this same ws (stops one connection from owning multiple clone seats).
+ */
+function attachPlayerSocket(ws, ctx, room, player) {
+  // If this socket already owned a different seat, drop that seat cleanly
+  if (ctx.room && ctx.playerId && ctx.playerId !== player.id) {
+    const prev = ctx.room.players.get(ctx.playerId);
+    if (prev && prev.ws === ws) {
+      // Remove the orphan seat entirely so it can't show as a grey clone
+      ctx.room.players.delete(ctx.playerId);
+      ctx.room.lobbyReadyIds?.delete?.(ctx.playerId);
+      ctx.room.votes?.delete?.(ctx.playerId);
+    }
+  }
+  // One socket must never own two seats in the same room (the clone bug)
+  for (const [id, p] of [...room.players.entries()]) {
+    if (id !== player.id && p.ws === ws) {
+      room.players.delete(id);
+      room.lobbyReadyIds?.delete?.(id);
+      room.votes?.delete?.(id);
+    }
+  }
+  player.ws = ws;
+  player.connected = true;
+  ctx.room = room;
+  ctx.playerId = player.id;
+}
+
 async function handle(ws, ctx, msg, type, rooms, hub) {
   if (type === 'create') {
+    // Already in a room on this socket — don't stack create/join clones
+    if (ctx.room && ctx.playerId) {
+      send(ws, 'joined', { state: ctx.room.snapshot(ctx.playerId) });
+      return;
+    }
     let code = genCode();
     while (rooms.has(code)) code = genCode();
     const room = new Room(code, hub);
@@ -118,9 +155,7 @@ async function handle(ws, ctx, msg, type, rooms, hub) {
       sessionToken: msg.sessionToken,
       preferHost: true,
     });
-    player.ws = ws;
-    ctx.room = room;
-    ctx.playerId = player.id;
+    attachPlayerSocket(ws, ctx, room, player);
     send(ws, 'joined', { state: room.snapshot(player.id) });
     return;
   }
@@ -136,6 +171,33 @@ async function handle(ws, ctx, msg, type, rooms, hub) {
       err.code = 'NOT_FOUND';
       throw err;
     }
+    // Same socket + same room already: reclaim seat (never mint a clone)
+    if (ctx.room === room && ctx.playerId && room.players.has(ctx.playerId)) {
+      const existing = room.players.get(ctx.playerId);
+      if (existing && !existing.banned) {
+        const player = room.addPlayer({
+          displayName: msg.displayName,
+          color: msg.color,
+          avatar: msg.avatar,
+          pfp: msg.pfp,
+          sessionToken: msg.sessionToken || existing.sessionToken,
+        });
+        attachPlayerSocket(ws, ctx, room, player);
+        room.broadcast();
+        send(ws, 'joined', { state: room.snapshot(player.id) });
+        return;
+      }
+    }
+    // Leaving a previous room on this socket before joining another
+    if (ctx.room && ctx.playerId && ctx.room !== room) {
+      ctx.room.setDisconnected(ctx.playerId, ws);
+      if (ctx.room.players.size === 0) {
+        ctx.room.destroy();
+        rooms.delete(ctx.room.code);
+      }
+      ctx.room = null;
+      ctx.playerId = null;
+    }
     const player = room.addPlayer({
       displayName: msg.displayName,
       color: msg.color,
@@ -143,9 +205,7 @@ async function handle(ws, ctx, msg, type, rooms, hub) {
       pfp: msg.pfp,
       sessionToken: msg.sessionToken,
     });
-    player.ws = ws;
-    ctx.room = room;
-    ctx.playerId = player.id;
+    attachPlayerSocket(ws, ctx, room, player);
     room.broadcast();
     send(ws, 'joined', { state: room.snapshot(player.id) });
     return;

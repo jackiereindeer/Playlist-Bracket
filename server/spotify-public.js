@@ -18,7 +18,7 @@ function extractPlaylistId(input) {
   if (!input || typeof input !== 'string') return null;
   const trimmed = input.trim();
 
-  const uriMatch = trimmed.match(/^spotify:playlist:([a-zA-Z0-9]+)$/);
+  const uriMatch = trimmed.match(/^spotify:playlist:([a-zA-Z0-9]+)$/i);
   if (uriMatch) return uriMatch[1];
 
   try {
@@ -40,6 +40,34 @@ function extractPlaylistId(input) {
   }
 
   if (/^[a-zA-Z0-9]{22}$/.test(trimmed)) return trimmed;
+  return null;
+}
+
+/**
+ * Spotify album id from open.spotify.com/album/…, spotify:album:…, or embed URL.
+ * Bare 22-char ids are NOT treated as albums (ambiguous with playlists/tracks).
+ */
+function extractAlbumId(input) {
+  if (!input || typeof input !== 'string') return null;
+  const trimmed = input.trim();
+
+  const uriMatch = trimmed.match(/^spotify:album:([a-zA-Z0-9]+)$/i);
+  if (uriMatch) return uriMatch[1];
+
+  try {
+    const url = new URL(trimmed);
+    const host = url.hostname.replace(/^www\./, '');
+    if (host === 'open.spotify.com' || host === 'spotify.link' || host === 'embed.spotify.com') {
+      const parts = url.pathname.split('/').filter(Boolean);
+      // /album/ID or /embed/album/ID
+      const albumIdx = parts.indexOf('album');
+      if (albumIdx !== -1 && parts[albumIdx + 1]) {
+        return parts[albumIdx + 1].split('?')[0];
+      }
+    }
+  } catch {
+  }
+
   return null;
 }
 
@@ -445,6 +473,103 @@ async function fetchPublicPlaylist(playlistId) {
   return fetchPlaylistViaEmbed(playlistId);
 }
 
+/**
+ * Load a public Spotify album as a track list (same shape as a playlist load).
+ * Uses the public embed page (no OAuth) — works for open albums.
+ */
+async function fetchAlbumViaEmbed(albumId) {
+  const id = String(albumId || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 64);
+  if (!id) {
+    const err = new Error('Invalid Spotify album id.');
+    err.status = 400;
+    throw err;
+  }
+
+  const html = await fetchEmbedHtml('album', id);
+  const next = parseNextData(html);
+  const entity = next?.props?.pageProps?.state?.data?.entity;
+
+  if (!entity || !Array.isArray(entity.trackList)) {
+    const err = new Error(
+      'No songs found. The album may be unavailable in your region, or the link is wrong.'
+    );
+    err.status = 404;
+    throw err;
+  }
+
+  const albumCover =
+    entity.coverArt?.sources?.find((s) => s?.width >= 300)?.url ||
+    entity.coverArt?.sources?.[0]?.url ||
+    entity.visualIdentity?.image?.[0]?.url ||
+    null;
+
+  const artistsLabel = String(
+    entity.subtitle ||
+      entity.artists?.[0]?.name ||
+      entity.artistName ||
+      entity.authors?.[0]?.name ||
+      ''
+  )
+    .replace(/\u00a0/g, ' ')
+    .trim();
+
+  const tracks = [];
+  const seen = new Set();
+  for (const item of entity.trackList) {
+    if (!item || item.entityType === 'episode') continue;
+    const trackId =
+      typeof item.uri === 'string' ? item.uri.split(':').pop() : item.id || null;
+    if (!trackId || seen.has(trackId)) continue;
+    seen.add(trackId);
+
+    // Prefer per-track art when present; fall back to album cover
+    const trackImage =
+      item.coverArt?.sources?.find((s) => s?.url)?.url ||
+      item.coverArt?.sources?.[0]?.url ||
+      albumCover;
+
+    const trackArtists = String(
+      item.subtitle || item.artists || artistsLabel || 'Unknown artist'
+    )
+      .replace(/\u00a0/g, ' ')
+      .trim();
+
+    tracks.push({
+      id: trackId,
+      name: item.title || item.name || 'Unknown track',
+      artists: trackArtists,
+      image: trackImage,
+      source: 'spotify',
+      spotifyUrl: `https://open.spotify.com/track/${trackId}`,
+      embedUrl: `https://open.spotify.com/embed/track/${trackId}?utm_source=generator&theme=0`,
+    });
+  }
+
+  if (!tracks.length) {
+    const err = new Error('No playable songs found on that album.');
+    err.status = 404;
+    throw err;
+  }
+
+  return {
+    id,
+    name: entity.title || entity.name || 'Album',
+    description: '',
+    image: albumCover,
+    owner: artistsLabel,
+    spotifyUrl: `https://open.spotify.com/album/${id}`,
+    totalFromSpotify: tracks.length,
+    source: 'spotify',
+    kind: 'album',
+    tracks,
+  };
+}
+
+/** Public album → same shape as fetchPublicPlaylist (solo / rating / party all reuse it). */
+async function fetchPublicAlbum(albumId) {
+  return fetchAlbumViaEmbed(albumId);
+}
+
 async function fetchTrackPreview(trackId) {
   const id = String(trackId || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 64);
   if (!id) {
@@ -555,8 +680,11 @@ async function fetchPublicTrack(trackId) {
 
 export {
   extractPlaylistId,
+  extractAlbumId,
   extractTrackId,
   fetchPublicPlaylist,
+  fetchPublicAlbum,
+  fetchAlbumViaEmbed,
   fetchPlaylistViaPathfinder,
   fetchPlaylistViaEmbed,
   fetchPublicTrack,

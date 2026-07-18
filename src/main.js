@@ -45,7 +45,6 @@ import {
   buildRatingResultsImageBlob,
   copyOrDownloadRatingImage,
 } from './rating-export-image.js';
-
 const app = document.querySelector('#app');
 
 let state = null;
@@ -1619,7 +1618,7 @@ function renderSetupLoad() {
               id="playlist-url"
               name="url"
               type="url"
-              placeholder="Spotify / YouTube playlist, or Spotify song…"
+              placeholder="Spotify playlist / album / song, or YouTube playlist…"
               required
               autocomplete="off"
               value="${escapeHtml(lastSetupUrl || '')}"
@@ -1629,7 +1628,7 @@ function renderSetupLoad() {
           ${
             error
               ? `<div class="error-box" role="alert">${escapeHtml(error)}</div>`
-              : `<p class="setup-note">Load a Spotify or YouTube playlist, then add more songs or playlists from either service.</p>`
+              : `<p class="setup-note">Load a Spotify playlist or album (or YouTube playlist), then add more songs, albums, or playlists.</p>`
           }
 
           <div class="form-actions">
@@ -1749,7 +1748,7 @@ function renderSetupRoster() {
             <input
               id="add-song-url"
               type="url"
-              placeholder="Spotify / YouTube song or playlist…"
+              placeholder="Spotify song / album / playlist, or YouTube…"
               autocomplete="off"
               value="${escapeHtml(draft.addUrl || '')}"
               ${busy ? 'disabled' : ''}
@@ -1968,7 +1967,7 @@ async function onLoadPlaylist(e) {
   const form = e.target;
   const url = form.url?.value?.trim?.() || '';
   if (!url) {
-    error = 'Paste a public Spotify or YouTube playlist link (or a Spotify song).';
+    error = 'Paste a public Spotify playlist, album, or song link (or a YouTube playlist).';
     render();
     return;
   }
@@ -2078,7 +2077,7 @@ async function onAddSongToDraft() {
   const input = document.getElementById('add-song-url');
   const url = (input?.value || setupDraft.addUrl || '').trim();
   if (!url) {
-    error = 'Paste a Spotify or YouTube song or playlist link.';
+    error = 'Paste a Spotify song, album, or playlist link (or YouTube).';
     render();
     return;
   }

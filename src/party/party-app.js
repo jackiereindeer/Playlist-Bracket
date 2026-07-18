@@ -323,6 +323,8 @@ export function startPartyApp(root, opts) {
   let reconnectTimer = 0;
   let intentionalClose = false;
   let lastJoinPayload = null; // { mode: 'create'|'join', code?, ...identity }
+  /** True while waiting for first joined/error after create/join send — blocks double-fire */
+  let joinSendPending = false;
 
   // Fresh identity every party session / full page load
   clearLegacyIdentityPrefs();
@@ -753,10 +755,11 @@ export function startPartyApp(root, opts) {
       connecting = false;
       reconnectAttempt = 0;
       if (statusLine === 'Reconnecting…') statusLine = '';
-      // Re-auth after reconnect if we were mid-session
-      if (lastJoinPayload && screen === 'live') {
+      // Re-auth after reconnect if we were mid-session (one join only)
+      if (lastJoinPayload && screen === 'live' && !joinSendPending) {
         const p = lastJoinPayload;
         if (p.mode === 'join' && p.code) {
+          joinSendPending = true;
           send('join', {
             code: p.code,
             displayName: p.displayName,
@@ -788,6 +791,7 @@ export function startPartyApp(root, opts) {
         state = msg.state;
         screen = 'live';
         gateError = '';
+        joinSendPending = false;
         // Keep address bar shareable: ?room=CODE
         if (state?.code) setUrlRoomParam(state.code);
         if (state?.you?.sessionToken) {
@@ -941,6 +945,7 @@ export function startPartyApp(root, opts) {
         gateError = msg.error || 'Something went wrong.';
         statusLine = '';
         connecting = false;
+        joinSendPending = false;
         if (!state || screen !== 'live') {
           screen = 'gate';
           gateMode = 'join';
@@ -996,6 +1001,7 @@ export function startPartyApp(root, opts) {
     ws.onerror = () => {
       connecting = false;
       if (screen === 'live') return; // onclose handles reconnect
+      joinSendPending = false;
       gateError =
         'Could not connect to party server. Free hosts may be waking up — wait 30–60s and try again.';
       render();
@@ -1014,9 +1020,11 @@ export function startPartyApp(root, opts) {
   }
 
   function createRoom() {
+    if (joinSendPending || screen === 'live') return;
     endedByHost = false;
     gateError = '';
     chatMessages = [];
+    joinSendPending = true;
     lastJoinPayload = {
       mode: 'create',
       displayName: form.displayName,
@@ -1040,16 +1048,21 @@ export function startPartyApp(root, opts) {
         });
       } else if (ws?.readyState === 0) {
         setTimeout(tryCreate, 50);
+      } else {
+        // Socket died before send — allow retry
+        joinSendPending = false;
       }
     };
     tryCreate();
   }
 
   function joinRoom() {
+    if (joinSendPending || screen === 'live') return;
     endedByHost = false;
     gateError = '';
     chatMessages = []; // only messages after join (3B)
     const code = normalizeRoomCode(form.code);
+    joinSendPending = true;
     lastJoinPayload = {
       mode: 'join',
       code,
@@ -1073,6 +1086,9 @@ export function startPartyApp(root, opts) {
         });
       } else if (ws?.readyState === 0) {
         setTimeout(tryJoin, 50);
+      } else {
+        // Socket died before send — allow retry
+        joinSendPending = false;
       }
     };
     tryJoin();
@@ -2467,8 +2483,8 @@ export function startPartyApp(root, opts) {
             </label>
           </div>
           <div class="field">
-            <label for="p-url">Playlist or song link (Spotify / YouTube)</label>
-            <input id="p-url" type="url" placeholder="Spotify or YouTube playlist / song…" value="${esc(
+            <label for="p-url">Playlist, album, or song link (Spotify / YouTube)</label>
+            <input id="p-url" type="url" placeholder="Spotify playlist / album / song, or YouTube…" value="${esc(
               form.playlistUrl || s.playlistUrl || ''
             )}" />
           </div>
@@ -2541,7 +2557,7 @@ export function startPartyApp(root, opts) {
               <div class="field roster-add-field">
                 <label for="p-add-song">${
                   isHost
-                    ? 'Add song or playlist by link'
+                    ? 'Add song, album, or playlist by link'
                     : 'Add a single song by link'
                 }</label>
                 <div class="roster-add-row">
@@ -2550,7 +2566,7 @@ export function startPartyApp(root, opts) {
                     type="url"
                     placeholder="${
                       isHost
-                        ? 'Spotify / YouTube song or playlist…'
+                        ? 'Spotify song / album / playlist, or YouTube…'
                         : 'Spotify or YouTube song link…'
                     }"
                     autocomplete="off"
@@ -2560,8 +2576,8 @@ export function startPartyApp(root, opts) {
                 </div>
                 ${
                   isHost
-                    ? `<p class="setup-note">Playlists and single songs both work. Mix Spotify + YouTube.</p>`
-                    : `<p class="setup-note">Single songs only — playlists are host-only. Host decides what’s in the bracket.</p>`
+                    ? `<p class="setup-note">Albums, playlists, and single songs all work. Mix Spotify + YouTube.</p>`
+                    : `<p class="setup-note">Single songs only — albums/playlists are host-only. Host decides what’s in the list.</p>`
                 }
               </div>
             `
@@ -2895,7 +2911,7 @@ export function startPartyApp(root, opts) {
         const url = (addInput?.value || form.addSongUrl || '').trim();
         if (!url) {
           statusLine = isHost
-            ? 'Paste a song or playlist link first.'
+            ? 'Paste a song, album, or playlist link first.'
             : 'Paste a single song link first.';
           const st = root.querySelector('.party-status');
           if (st) st.textContent = statusLine;

@@ -5,8 +5,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import {
   extractPlaylistId,
+  extractAlbumId,
   extractTrackId,
   fetchPublicPlaylist,
+  fetchPublicAlbum,
   fetchPublicTrack,
   fetchTrackPreview,
 } from './spotify-public.js';
@@ -105,12 +107,29 @@ app.get('/api/playlist', async (req, res) => {
       }
     }
 
+    // Spotify album (public embed — same multi-track shape as a playlist)
+    const albumId = extractAlbumId(raw);
+    if (albumId) {
+      const album = await fetchPublicAlbum(albumId);
+      if (!album?.tracks || album.tracks.length < 1) {
+        return res.status(400).json({
+          error: 'No playable songs found on that album.',
+        });
+      }
+      album.source = album.source || 'spotify';
+      for (const t of album.tracks) {
+        if (!t.source) t.source = 'spotify';
+      }
+      res.set('Cache-Control', 'private, max-age=60');
+      return res.json(album);
+    }
+
     // Spotify playlist
     const playlistId = extractPlaylistId(raw);
     if (!playlistId) {
       return res.status(400).json({
         error:
-          'Invalid link. Paste a public Spotify/YouTube playlist, or a Spotify song link.',
+          'Invalid link. Paste a public Spotify/YouTube playlist, Spotify album, or Spotify song link.',
       });
     }
 
